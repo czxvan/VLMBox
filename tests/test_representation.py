@@ -10,7 +10,6 @@ from vlmbox.representation import (
     cosine_similarity,
     mean_difference,
     normalize_direction,
-    paired_difference,
     project,
     projection_coefficient,
     projection_length,
@@ -26,6 +25,15 @@ def test_mean_difference_supports_unequal_sample_counts() -> None:
     assert torch.allclose(result, torch.tensor([2.0, 4.0]))
 
 
+def test_mean_difference_equals_mean_of_pairwise_differences_when_aligned() -> None:
+    positive = torch.tensor([[3.0, 2.0], [5.0, 8.0], [7.0, 4.0]])
+    negative = torch.tensor([[1.0, 1.0], [2.0, 4.0], [3.0, 2.0]])
+
+    result = mean_difference(positive, negative)
+
+    assert torch.allclose(result, (positive - negative).mean(dim=0))
+
+
 def test_mean_difference_reduces_arbitrary_sample_dimension() -> None:
     positive = torch.tensor(
         [
@@ -39,21 +47,6 @@ def test_mean_difference_reduces_arbitrary_sample_dimension() -> None:
 
     assert result.shape == (2, 2)
     assert torch.equal(result, positive.mean(dim=1))
-
-
-def test_paired_difference_averages_aligned_pairs() -> None:
-    positive = torch.tensor([[3.0, 2.0], [5.0, 8.0]])
-    negative = torch.tensor([[1.0, 1.0], [2.0, 4.0]])
-
-    result = paired_difference(positive, negative)
-
-    assert torch.equal(result, torch.tensor([2.5, 2.5]))
-    assert torch.equal(result, mean_difference(positive, negative))
-
-
-def test_paired_difference_rejects_unmatched_shapes() -> None:
-    with pytest.raises(ValueError, match="identical"):
-        paired_difference(torch.ones(2, 3), torch.ones(3, 3))
 
 
 def test_mean_difference_rejects_mismatched_non_sample_dimensions() -> None:
@@ -111,6 +104,26 @@ def test_projection_length_is_signed_and_uses_unit_direction() -> None:
     assert torch.equal(result, torch.tensor([3.0, -3.0]))
 
 
+def test_projection_length_is_invariant_to_positive_direction_scaling() -> None:
+    hidden = torch.tensor([[3.0, 4.0], [-3.0, 4.0]])
+    direction = torch.tensor([2.0, -1.0])
+
+    original = projection_length(hidden, direction)
+    scaled = projection_length(hidden, direction * 7.5)
+
+    assert torch.allclose(original, scaled)
+
+
+def test_projection_residual_is_orthogonal_to_direction() -> None:
+    hidden = torch.tensor([[3.0, 4.0, -2.0], [1.0, -5.0, 7.0]])
+    direction = torch.tensor([2.0, -3.0, 1.0])
+
+    residual = hidden - project(hidden, direction)
+    inner_product = (residual * direction).sum(dim=-1)
+
+    assert torch.allclose(inner_product, torch.zeros_like(inner_product), atol=1e-6)
+
+
 def test_projection_supports_broadcasting_and_keepdim() -> None:
     hidden = torch.tensor([[[3.0, 4.0], [1.0, 2.0]], [[5.0, 6.0], [7.0, 8.0]]])
     direction = torch.tensor([1.0, 0.0])
@@ -164,12 +177,11 @@ def test_cosine_rejects_zero_vectors() -> None:
         cosine_similarity(torch.zeros(3), torch.ones(3))
 
 
-@pytest.mark.parametrize("function", [mean_difference, paired_difference])
-def test_direction_extraction_preserves_autograd(function) -> None:
+def test_direction_extraction_preserves_autograd() -> None:
     positive = torch.tensor([[2.0, 4.0], [4.0, 6.0]], requires_grad=True)
     negative = torch.tensor([[1.0, 2.0], [2.0, 3.0]], requires_grad=True)
 
-    result = function(positive, negative)
+    result = mean_difference(positive, negative)
     result.sum().backward()
 
     assert positive.grad is not None

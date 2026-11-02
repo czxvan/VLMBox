@@ -91,34 +91,6 @@ def mean_difference(
     return positive.to(dtype=dtype).mean(dim=dim) - negative.to(dtype=dtype).mean(dim=dim)
 
 
-def paired_difference(
-    positive: Tensor,
-    negative: Tensor,
-    dim: int = 0,
-) -> Tensor:
-    """Return the mean of aligned pairwise differences positive - negative.
-
-    Unlike mean_difference, this operation requires identical shapes:
-    sample i in positive is paired with sample i in negative. The result is
-    averaged along dim and points from negative to positive.
-    """
-    _require_floating("positive", positive)
-    _require_floating("negative", negative)
-    _require_same_device("positive", positive, "negative", negative)
-    if positive.shape != negative.shape:
-        raise ValueError(
-            "paired_difference requires identical positive and negative shapes; "
-            f"got {tuple(positive.shape)} and {tuple(negative.shape)}"
-        )
-
-    dim = _normalize_dim(dim, positive.ndim)
-    if positive.shape[dim] == 0:
-        raise ValueError("paired inputs must contain at least one pair")
-
-    dtype = _compute_dtype(positive, negative)
-    return (positive.to(dtype=dtype) - negative.to(dtype=dtype)).mean(dim=dim)
-
-
 def normalize_direction(direction: Tensor, dim: int = -1, eps: float = 1e-12) -> Tensor:
     """Normalize a direction along dim; reject zero or non-finite vectors."""
     _require_floating("direction", direction)
@@ -234,7 +206,6 @@ __all__ = [
     "cosine_similarity",
     "mean_difference",
     "normalize_direction",
-    "paired_difference",
     "project",
     "projection_coefficient",
     "projection_length",

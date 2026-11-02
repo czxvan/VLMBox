@@ -10,7 +10,7 @@ VLMBox focuses on model internals and research operations rather than serving or
 - **Adapter** — resolve language decoder components without hard-coding a model family into research code.
 - **Activation** — context-managed capture and intervention on decoder blocks, attention, and MLP outputs.
 - **Representation** — training-free direction extraction and representation geometry.
-- **Image** — image perturbation and patch operations (planned).
+- **Image** — architecture-independent RGB conversion, resizing, cropping, and patch placement.
 - **Generation** — generation results and internal traces (planned).
 - **Repro** — deterministic execution and run metadata (under development).
 
@@ -95,7 +95,6 @@ from vlmbox import (
     cosine_similarity,
     mean_difference,
     normalize_direction,
-    paired_difference,
     project,
     projection_coefficient,
     projection_length,
@@ -109,7 +108,7 @@ with vlm.capture("block", layers=[16, 20], positions="last") as negative_cache:
 
 # Directions point from the negative condition toward the positive condition.
 direction_16 = mean_difference(positive_cache[16], negative_cache[16], dim=0)
-direction_20 = paired_difference(positive_cache[20], negative_cache[20], dim=0)
+direction_20 = mean_difference(positive_cache[20], negative_cache[20], dim=0)
 unit_direction = normalize_direction(direction_16)
 
 # Analyze activation projection and cross-layer direction geometry.
@@ -120,9 +119,25 @@ similarity = cosine_similarity(direction_16, direction_20)
 theta_degrees = angle(direction_16, direction_20, degrees=True)
 ```
 
-`mean_difference(positive, negative)` computes the difference between independent sample means; sample counts may differ. `paired_difference(positive, negative)` requires identical shapes and averages aligned pairwise differences. Both use `positive - negative` sign convention and reduce the sample dimension (`dim=0` by default). `normalize_direction` normalizes along the feature dimension (`dim=-1` by default).
+`mean_difference(positive, negative)` computes the difference between independent sample means; sample counts may differ. It is also equal to the mean of pairwise differences when the two sample sets are aligned and have the same size, so VLMBox exposes only this one aggregate direction operation. It uses the `positive - negative` sign convention and reduces the sample dimension (`dim=0` by default). `normalize_direction` normalizes along the feature dimension (`dim=-1` by default).
 
 `projection_coefficient` returns `dot(hidden, direction) / dot(direction, direction)`. `projection_length` returns the signed scalar projection onto a unit direction, and `project` returns the corresponding vector component. `cosine_similarity` returns cosine similarity, while `angle` returns radians by default or degrees with `degrees=True`. Geometry operations support PyTorch broadcasting and use float32 accumulation for fp16/bf16 inputs. Zero directions are rejected rather than silently producing NaNs.
+
+## Image
+
+Image helpers are architecture-independent and use Pillow. They return new RGB images and do not mutate their inputs:
+
+```python
+from PIL import Image
+from vlmbox.image import crop_image, place_patch, resize_image, to_rgb
+
+image = to_rgb(Image.open("example.jpg"))
+resized = resize_image(image, (672, 756))  # (width, height), LANCZOS by default
+patch = crop_image(image, (0, 0, 192, 192))  # (left, top, right, bottom)
+composed = place_patch(image, patch, (32, 32))  # (left, top), no implicit resize
+```
+
+`crop_image` uses half-open pixel coordinates and rejects empty or out-of-bounds boxes. `place_patch` requires the entire patch to fit inside the base image. An optional same-size `L` or `1` mask blends the patch into the base (`0` keeps the base; `255` replaces it). `to_rgb` follows Pillow conversion semantics and discards an existing alpha channel rather than compositing it.
 
 Models are downloaded through ModelScope's default cache. `VLM.from_pretrained()` accepts a ModelScope model ID only. The runtime uses `AutoProcessor` and `AutoModelForMultimodalLM`, with `dtype="auto"`, `device_map="auto"`, and fixed `trust_remote_code=True`. Only load model repositories whose code you trust.
 

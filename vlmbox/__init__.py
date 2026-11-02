@@ -1,12 +1,12 @@
 """VLMBox: a lightweight research toolbox for vision-language models."""
 
+from vlmbox.image import crop_image, place_patch, resize_image, to_rgb
 from vlmbox.model import VLM
 from vlmbox.representation import (
     angle,
     cosine_similarity,
     mean_difference,
     normalize_direction,
-    paired_difference,
     project,
     projection_coefficient,
     projection_length,
@@ -14,11 +14,14 @@ from vlmbox.representation import (
 
 __all__ = [
     "VLM",
+    "crop_image",
+    "place_patch",
+    "resize_image",
+    "to_rgb",
     "angle",
     "cosine_similarity",
     "mean_difference",
     "normalize_direction",
-    "paired_difference",
     "project",
     "projection_coefficient",
     "projection_length",
