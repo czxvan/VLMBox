@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from torch import Tensor
+
+from vlmbox.activation import (
+    ActivationCapture,
+    ActivationIntervention,
+    Component,
+    InterventionOperation,
+    InterventionScope,
+    PositionSelector,
+)
 from vlmbox.adapter import ModelAdapter, TransformersAdapter
 
 
@@ -75,6 +85,43 @@ class VLM:
         model.eval()
         adapter = TransformersAdapter(model)
         return cls(model_id.strip(), model_path, model, processor, adapter)
+
+    def capture(
+        self,
+        component: Component,
+        layers: int | Sequence[int],
+        positions: PositionSelector = "last",
+    ) -> ActivationCapture:
+        """Capture the first output of selected decoder modules in a context.
+
+        Captures are keyed by decoder layer index and record the first invocation
+        of each selected module. With cached generation, this is normally prompt
+        prefill. Nested hooks run in registration order: enter an intervention
+        before capture to record the edited activation.
+        """
+        return ActivationCapture(self.adapter, component, layers, positions)
+
+    def intervene(
+        self,
+        component: Component,
+        layer: int,
+        operation: InterventionOperation,
+        value: Tensor | None = None,
+        scale: float = 1.0,
+        positions: PositionSelector = "last",
+        scope: InterventionScope = "every_forward",
+    ) -> ActivationIntervention:
+        """Temporarily edit a decoder activation while a context is active.
+
+        Add computes h + scale * value; replace substitutes value; project_out
+        removes the projection onto value; zero clears the selected activations.
+        Values must broadcast to the selected activation shape. ``first_forward``
+        edits each target layer only on its first invocation; ``every_forward``
+        reapplies the edit on every invocation, including autoregressive decoding.
+        """
+        return ActivationIntervention(
+            self.adapter, component, layer, operation, value, scale, positions, scope
+        )
 
     def prepare(self, messages: list[dict[str, Any]]) -> Any:
         """Apply the model's chat template and return tensor inputs."""
