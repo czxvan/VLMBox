@@ -47,9 +47,9 @@ response = vlm.processor.batch_decode(new_tokens, skip_special_tokens=True)[0]
 print(response)
 ```
 
-Models are downloaded through ModelScope's default cache. `VLM.from_pretrained()` accepts a ModelScope model ID only. The runtime uses `AutoProcessor` and `AutoModelForMultimodalLM`, with `dtype="auto"` and `device_map="auto"`. Model repository code is never executed: `trust_remote_code` is fixed to `False`.
+The runtime dependencies include PyTorch, torchvision, and Pillow for model and image processing. Models are downloaded through ModelScope's default cache. `VLM.from_pretrained()` accepts a ModelScope model ID only. The runtime uses `AutoProcessor` and `AutoModelForMultimodalLM`, with `dtype="auto"` and `device_map="auto"`. Model repository code is never executed: `trust_remote_code` is fixed to `False`.
 
-The generic `TransformersAdapter` has been structurally validated against Qwen2.5-VL-3B, InternVL3.5-2B-HF, and SmolVLM-500M. End-to-end CPU smoke tests have passed on SmolVLM-500M with both text-only and image inputs.
+The generic `TransformersAdapter` has been validated against Qwen2.5-VL-3B, InternVL3.5-2B-HF, and SmolVLM-500M. Full CPU load and text-generation smoke tests passed for all three; image-input smoke tests passed for SmolVLM and the InternVL processor.
 
 ## Development
 
