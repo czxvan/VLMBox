@@ -16,11 +16,14 @@ VLMBox focuses on model internals and research operations rather than serving or
 
 ## Installation
 
-VLMBox targets Python 3.11+ and Transformers 5.x. Install a PyTorch build compatible with your platform and accelerator, then install VLMBox:
+VLMBox targets Python 3.11+ and uses one CUDA 13.0 PyTorch build for NVIDIA RTX 3090 (Ampere) and RTX 4090 (Ada). The supported Linux research machines must have an NVIDIA driver >=580. Use a machine-local environment rather than placing `.venv` on the shared workspace:
 
 ```bash
-uv sync --extra dev
+export UV_PROJECT_ENVIRONMENT="$HOME/.venvs/VLMBox"
+uv sync --locked --extra dev
 ```
+
+The Tsinghua PyPI mirror and PyTorch CUDA 13.0 index are both declared in `pyproject.toml`, so dependency resolution does not depend on machine-specific uv configuration. `uv.lock` pins the resolved wheels. Use the same commands on each machine. Do not manually install a CPU-only PyTorch build or use `pip`/Conda to mutate this environment.
 
 ## Quick start
 
@@ -47,13 +50,14 @@ response = vlm.processor.batch_decode(new_tokens, skip_special_tokens=True)[0]
 print(response)
 ```
 
-The runtime dependencies include PyTorch, torchvision, and Pillow for model and image processing. Models are downloaded through ModelScope's default cache. `VLM.from_pretrained()` accepts a ModelScope model ID only. The runtime uses `AutoProcessor` and `AutoModelForMultimodalLM`, with `dtype="auto"` and `device_map="auto"`. Model repository code is never executed: `trust_remote_code` is fixed to `False`.
+Models are downloaded through ModelScope's default cache. `VLM.from_pretrained()` accepts a ModelScope model ID only. The runtime uses `AutoProcessor` and `AutoModelForMultimodalLM`, with `dtype="auto"`, `device_map="auto"`, and fixed `trust_remote_code=True`. Only load model repositories whose code you trust.
 
-The generic `TransformersAdapter` has been validated against Qwen2.5-VL-3B, InternVL3.5-2B-HF, and SmolVLM-500M. Full CPU load and text-generation smoke tests passed for all three; image-input smoke tests passed for SmolVLM and the InternVL processor.
+The generic `TransformersAdapter` has been validated against Qwen2.5-VL-3B, InternVL3.5-2B-HF, and SmolVLM-500M. GPU smoke tests are the required runtime validation path; CPU-only tests are limited to isolated unit tests.
 
 ## Development
 
 ```bash
+export UV_PROJECT_ENVIRONMENT="$HOME/.venvs/VLMBox"
 uv run pytest
 uv run ruff check .
 ```

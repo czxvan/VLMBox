@@ -9,15 +9,11 @@ from typing import Any
 from vlmbox.adapter import ModelAdapter, TransformersAdapter
 
 
-class ModelLoadError(RuntimeError):
-    """Raised when a ModelScope checkpoint cannot be loaded by native Transformers."""
-
-
 class VLM:
     """A thin research-oriented wrapper around a Transformers multimodal model.
 
-    Load models by ModelScope ID only. Transformers remote code execution is
-    intentionally disabled; architectures must be implemented by Transformers.
+    Load models by ModelScope ID only. Trusted ModelScope repository code is
+    enabled to support model-specific processors and architectures.
     """
 
     def __init__(
@@ -65,27 +61,16 @@ class VLM:
             ) from exc
 
         model_path = str(snapshot_download(model_id.strip()))
-        try:
-            processor = AutoProcessor.from_pretrained(
-                model_path,
-                trust_remote_code=False,
-            )
-            model = AutoModelForMultimodalLM.from_pretrained(
-                model_path,
-                dtype="auto",
-                device_map="auto",
-                trust_remote_code=False,
-            )
-        except (ValueError, ImportError) as exc:
-            message = str(exc).lower()
-            if any(
-                marker in message for marker in ("trust_remote_code", "remote code", "custom code")
-            ):
-                raise ModelLoadError(
-                    f"Model {model_id!r} requires custom repository code, but VLMBox "
-                    "loads only native Transformers implementations (trust_remote_code=False)."
-                ) from exc
-            raise
+        processor = AutoProcessor.from_pretrained(
+            model_path,
+            trust_remote_code=True,
+        )
+        model = AutoModelForMultimodalLM.from_pretrained(
+            model_path,
+            dtype="auto",
+            device_map="auto",
+            trust_remote_code=True,
+        )
 
         model.eval()
         adapter = TransformersAdapter(model)

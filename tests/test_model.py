@@ -61,7 +61,7 @@ class FakeAutoModel:
         return cls.instance
 
 
-def install_fake_dependencies(monkeypatch, *, model_error=None):
+def install_fake_dependencies(monkeypatch):
     downloaded = []
 
     modelscope = types.ModuleType("modelscope")
@@ -86,8 +86,6 @@ def install_fake_dependencies(monkeypatch, *, model_error=None):
         @classmethod
         def from_pretrained(cls, path, **kwargs):
             cls.calls.append((path, kwargs))
-            if model_error is not None:
-                raise model_error
             cls.instance = FakeModel()
             return cls.instance
 
@@ -96,7 +94,7 @@ def install_fake_dependencies(monkeypatch, *, model_error=None):
     return downloaded, AutoModel
 
 
-def test_from_pretrained_uses_modelscope_and_native_transformers(monkeypatch) -> None:
+def test_from_pretrained_uses_modelscope_and_multimodal_transformers(monkeypatch) -> None:
     downloaded, auto_model = install_fake_dependencies(monkeypatch)
     FakeProcessor.calls.clear()
     auto_model.calls.clear()
@@ -108,25 +106,24 @@ def test_from_pretrained_uses_modelscope_and_native_transformers(monkeypatch) ->
     assert vlm.model_path == "/model-cache/fake-model"
     assert vlm.model.training is False
     assert len(vlm.adapter.layers) == 1
-    assert FakeProcessor.calls == [("/model-cache/fake-model", {"trust_remote_code": False})]
+    assert FakeProcessor.calls == [("/model-cache/fake-model", {"trust_remote_code": True})]
     assert auto_model.calls == [
         (
             "/model-cache/fake-model",
-            {"dtype": "auto", "device_map": "auto", "trust_remote_code": False},
+            {"dtype": "auto", "device_map": "auto", "trust_remote_code": True},
         )
     ]
 
 
-def test_remote_code_requirement_is_rejected(monkeypatch) -> None:
-    install_fake_dependencies(
-        monkeypatch,
-        model_error=ValueError("This model requires trust_remote_code=True"),
-    )
+def test_remote_code_is_enabled_for_processor_and_model(monkeypatch) -> None:
+    _, auto_model = install_fake_dependencies(monkeypatch)
+    FakeProcessor.calls.clear()
+    auto_model.calls.clear()
 
-    from vlmbox.model import ModelLoadError
+    VLM.from_pretrained("Org/CustomModel")
 
-    with pytest.raises(ModelLoadError, match="native Transformers implementations"):
-        VLM.from_pretrained("Org/CustomModel")
+    assert FakeProcessor.calls[0][1]["trust_remote_code"] is True
+    assert auto_model.calls[0][1]["trust_remote_code"] is True
 
 
 @pytest.mark.parametrize("model_id", ["", "   ", "/tmp/local-model"])

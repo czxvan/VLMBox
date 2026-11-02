@@ -9,12 +9,12 @@ description = "A lightweight research toolbox for vision-language models."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "torch>=2.5.0",
+    "torch==2.14.1+cu130",
     "transformers>=5.22.1,<6",
     "modelscope>=1.40.2",
     "accelerate>=1.10",
     "pillow>=10.0",
-    "torchvision>=0.20.0",
+    "torchvision==0.29.1+cu130",
 ]
 
 [project.optional-dependencies]
@@ -36,3 +36,20 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+# Pin the default package mirror so uv.lock resolves identically on every machine.
+[[tool.uv.index]]
+name = "pypi-mirror"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+# One CUDA 13.0 build supports the RTX 3090 (Ampere) and RTX 4090 (Ada).
+# Keep CUDA wheels explicit to prevent CPU-only PyTorch builds from being selected.
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+torchvision = { index = "pytorch-cu130" }
