@@ -10,12 +10,13 @@ VLMBox releases are published from version tags. The release workflow builds the
    - `pypi`
 3. Add `czxvan` as a required reviewer to the `pypi` Environment. Because this is currently a single-maintainer repository, `prevent_self_review` is disabled so the maintainer can approve their own release deployment. If a second maintainer is added later, enable `prevent_self_review` and add that maintainer as a reviewer.
 4. Create or sign in to a separate TestPyPI account at https://test.pypi.org/.
-5. Configure a Trusted Publisher on TestPyPI at https://test.pypi.org/manage/account/publishing/:
+5. Since `vlmbox` has not been created on TestPyPI yet, add a **pending publisher** from the TestPyPI account-level Publishing page: https://test.pypi.org/manage/account/publishing/ . Use these exact values:
+   - PyPI project name: `vlmbox`
    - Owner: `czxvan`
    - Repository: `VLMBox`
-   - Workflow: `publish.yml`
+   - Workflow filename: `publish.yml`
    - Environment: `testpypi`
-6. Configure a second Trusted Publisher on PyPI at https://pypi.org/manage/account/publishing/ with the same owner, repository, and workflow, and Environment `pypi`.
+6. Add a second **pending publisher** from the PyPI account-level Publishing page: https://pypi.org/manage/account/publishing/ . Use the same project name, owner, repository, and workflow filename, but set Environment to `pypi`.
 
 The workflow uses OIDC Trusted Publishing. Do not create or store long-lived PyPI API tokens in GitHub Secrets.
 
