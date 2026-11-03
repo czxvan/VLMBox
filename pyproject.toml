@@ -30,6 +30,9 @@ include = ["vlmbox*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = [
+    "gpu: requires CUDA and locally cached vision-language model checkpoints",
+]
 
 [tool.ruff]
 line-length = 100

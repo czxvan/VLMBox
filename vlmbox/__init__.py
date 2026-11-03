@@ -19,10 +19,24 @@ from vlmbox.representation import (
     projection_length,
 )
 from vlmbox.repro import set_seed
+from vlmbox.training import (
+    ImageSample,
+    ImageTrainer,
+    TrainingStep,
+    UniversalImageParameter,
+    UniversalPatch,
+    UniversalPerturbation,
+)
 
 __all__ = [
     "VLM",
     "set_seed",
+    "ImageSample",
+    "ImageTrainer",
+    "TrainingStep",
+    "UniversalImageParameter",
+    "UniversalPatch",
+    "UniversalPerturbation",
     "FinishReason",
     "GenerationPhase",
     "GenerationStep",

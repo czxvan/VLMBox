@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import torch
 from torch import Tensor
 
 from vlmbox.activation import (
@@ -202,6 +203,28 @@ class VLM:
         adapter = TransformersAdapter(model)
         return cls(model_id.strip(), model_path, model, processor, adapter)
 
+    @property
+    def input_device(self) -> torch.device:
+        """Return the device used for model inputs."""
+        device = getattr(self.model, "device", None)
+        if device is not None:
+            return torch.device(device)
+        try:
+            return next(self.model.parameters()).device
+        except StopIteration as exc:
+            raise RuntimeError(
+                "model has no parameters from which to infer an input device"
+            ) from exc
+
+    def _move_inputs_to_device(self, inputs: Mapping[str, Any]) -> Any:
+        device = self.input_device
+        if hasattr(inputs, "to"):
+            return inputs.to(device)
+        return {
+            key: value.to(device) if isinstance(value, Tensor) else value
+            for key, value in inputs.items()
+        }
+
     def capture(
         self,
         component: Component,
@@ -248,6 +271,107 @@ class VLM:
             return_dict=True,
             return_tensors="pt",
         )
+
+    def prepare_differentiable(
+        self,
+        messages: Sequence[Mapping[str, Any]] | Sequence[Sequence[Mapping[str, Any]]],
+        *,
+        add_generation_prompt: bool = True,
+    ) -> Any:
+        """Prepare Tensor images through the native processor without detaching gradients.
+
+        Accepts one conversation or a batch of conversations. Every conversation
+        must contain at least one ``{"type": "image", "image": tensor}`` item;
+        image tensors must be RGB CHW floats in [0, 1]. Images are moved to CPU
+        before preprocessing so configured resampling kernels (including
+        LANCZOS) are preserved. The resulting BatchFeature is then moved to the
+        model input device; both transfers remain differentiable.
+        """
+        if not isinstance(add_generation_prompt, bool):
+            raise TypeError("add_generation_prompt must be a bool")
+        if (
+            not isinstance(messages, Sequence)
+            or isinstance(messages, (str, bytes))
+            or not messages
+        ):
+            raise ValueError("messages must be a non-empty conversation or batch of conversations")
+
+        first = messages[0]
+        raw_conversations = [messages] if isinstance(first, Mapping) else messages
+        conversations: list[list[dict[str, Any]]] = []
+        for conversation_index, conversation in enumerate(raw_conversations):
+            if (
+                not isinstance(conversation, Sequence)
+                or isinstance(conversation, (str, bytes))
+                or not conversation
+            ):
+                raise ValueError(f"conversation {conversation_index} must be a non-empty sequence")
+            copied_messages: list[dict[str, Any]] = []
+            image_count = 0
+            for message in conversation:
+                if not isinstance(message, Mapping):
+                    raise TypeError("every conversation message must be a mapping")
+                copied_message = dict(message)
+                content = message.get("content")
+                if isinstance(content, Sequence) and not isinstance(content, (str, bytes)):
+                    copied_parts: list[Any] = []
+                    for part in content:
+                        if isinstance(part, Mapping) and part.get("type") == "image":
+                            image = part.get("image")
+                            if not isinstance(image, Tensor):
+                                raise TypeError(
+                                    "differentiable image content must contain a torch.Tensor"
+                                )
+                            if image.ndim != 3 or image.shape[0] != 3:
+                                raise ValueError(
+                                    "differentiable images must have shape [3, height, width]"
+                                )
+                            if not image.is_floating_point():
+                                raise TypeError(
+                                    "differentiable images must use a floating-point dtype"
+                                )
+                            if image.shape[-2] <= 0 or image.shape[-1] <= 0:
+                                raise ValueError("differentiable images must be non-empty")
+                            cpu_image = image.to(device="cpu", dtype=torch.float32).contiguous()
+                            detached = cpu_image.detach()
+                            if not bool(torch.isfinite(detached).all().item()):
+                                raise ValueError("differentiable images must contain finite values")
+                            if (
+                                float(detached.amin().item()) < 0.0
+                                or float(detached.amax().item()) > 1.0
+                            ):
+                                raise ValueError("differentiable image values must be in [0, 1]")
+                            copied_part = dict(part)
+                            copied_part["image"] = cpu_image
+                            copied_parts.append(copied_part)
+                            image_count += 1
+                        else:
+                            copied_parts.append(part)
+                    copied_message["content"] = copied_parts
+                copied_messages.append(copied_message)
+            if image_count == 0:
+                raise ValueError(f"conversation {conversation_index} contains no Tensor image")
+            conversations.append(copied_messages)
+
+        inputs = self.processor.apply_chat_template(
+            conversations,
+            tokenize=True,
+            add_generation_prompt=add_generation_prompt,
+            return_dict=True,
+            return_tensors="pt",
+            processor_kwargs={"do_rescale": False},
+        )
+        return self._move_inputs_to_device(inputs)
+
+    def forward(self, inputs: Mapping[str, Any], **forward_kwargs: Any) -> Any:
+        """Run a normal autograd-enabled model forward pass on prepared inputs.
+
+        Unlike ``generate()``, this method does not enter inference mode or detach
+        image tensors, so gradients can flow back to a universal image parameter.
+        """
+        if not isinstance(inputs, Mapping):
+            raise TypeError("inputs must be a mapping returned by a VLM preparation method")
+        return self.model(**self._move_inputs_to_device(inputs), **forward_kwargs)
 
     def generate(self, inputs: Mapping[str, Any], **generation_kwargs: Any) -> Any:
         """Run Transformers generation using prepared model inputs."""

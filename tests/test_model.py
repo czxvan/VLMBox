@@ -171,3 +171,34 @@ def test_prepare_and_generate_delegate_to_processor_and_model() -> None:
     result = vlm.generate({"input_ids": torch.tensor([[1, 2]])}, max_new_tokens=3)
     assert result["input_ids"].tolist() == [[1, 2]]
     assert result["max_new_tokens"] == 3
+
+
+def test_prepare_differentiable_preserves_gradient_and_uses_processor_kwargs() -> None:
+    model = FakeModel()
+    processor = FakeProcessor()
+    vlm = VLM(
+        model_id="Org/Model",
+        model_path="/model-cache/fake-model",
+        model=model,
+        processor=processor,
+        adapter=TransformersAdapter(model),
+    )
+    image = torch.rand(3, 8, 8, requires_grad=True)
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image},
+                {"type": "text", "text": "Describe this image."},
+            ],
+        }
+    ]
+
+    prepared = vlm.prepare_differentiable(messages)
+    assert prepared["processor_kwargs"] == {"do_rescale": False}
+    prepared_image = prepared["messages"][0][0]["content"][0]["image"]
+    prepared_image.square().mean().backward()
+
+    assert image.grad is not None
+    assert torch.count_nonzero(image.grad) > 0
+    assert messages[0]["content"][0]["image"] is image

@@ -1,29 +1,30 @@
 # VLMBox
 
-A lightweight, modular Python research toolbox for vision-language models.
+A lightweight Python research toolbox for vision-language models (VLMs).
 
-VLMBox focuses on model internals and research operations rather than serving or training infrastructure.
+VLMBox provides reusable model-inspection and universal-image-optimization primitives. It is intentionally not a general-purpose fine-tuning framework: research-specific objectives belong in the research project that defines them.
 
-## Design
+## Scope
 
-- **Model** — load ModelScope checkpoints through Transformers.
-- **Adapter** — resolve language decoder components without hard-coding a model family into research code.
-- **Activation** — context-managed capture and intervention on decoder blocks, attention, and MLP outputs.
+- **Model** — load ModelScope checkpoints through Transformers and prepare native model inputs.
+- **Adapter** — resolve common language-decoder components without coupling research code to one model family.
+- **Activation** — capture and temporarily intervene on decoder blocks, attention, and MLP outputs.
 - **Representation** — training-free direction extraction and representation geometry.
 - **Image** — architecture-independent RGB conversion, resizing, cropping, and patch placement.
+- **Training** — optimize one universal image perturbation or patch with a task-supplied objective.
 - **Generation** — structured generation results and opt-in internal traces.
-- **Repro** — random seed control and optional deterministic execution.
+- **Repro** — seed control and optional deterministic execution.
 
 ## Installation
 
-VLMBox targets Python 3.11+ and uses one CUDA 13.0 PyTorch build for NVIDIA RTX 3090 (Ampere) and RTX 4090 (Ada). The supported Linux research machines must have an NVIDIA driver >=580. Use a machine-local environment rather than placing `.venv` on the shared workspace:
+VLMBox targets Python 3.11+ and uses a CUDA 13.0 PyTorch build for NVIDIA RTX 3090 (Ampere) and RTX 4090 (Ada). The supported Linux research machines require an NVIDIA driver version 580 or newer. Use a machine-local environment rather than placing `.venv` on the shared workspace:
 
 ```bash
 export UV_PROJECT_ENVIRONMENT="$HOME/.venvs/VLMBox"
 uv sync --locked --extra dev
 ```
 
-The Tsinghua PyPI mirror and PyTorch CUDA 13.0 index are both declared in `pyproject.toml`, so dependency resolution does not depend on machine-specific uv configuration. `uv.lock` pins the resolved wheels. Use the same commands on each machine. Do not manually install a CPU-only PyTorch build or use `pip`/Conda to mutate this environment.
+The Tsinghua PyPI mirror and PyTorch CUDA 13.0 index are declared in `pyproject.toml`; `uv.lock` pins the resolved wheels. Use the same commands on each machine. Do not mutate this environment with a separate CPU-only PyTorch installation, pip, or Conda.
 
 ## Quick start
 
@@ -52,11 +53,11 @@ print(response)
 
 ## Activation
 
-Capture decoder outputs without changing the model:
+Capture decoder outputs without modifying the model:
 
 ```python
 with vlm.capture("block", layers=[8, 16, 24], positions="last") as cache:
-    output_ids = vlm.generate(inputs, max_new_tokens=32)
+    vlm.generate(inputs, max_new_tokens=32)
 
 last_layer_state = cache[24]  # [batch, 1, hidden_size]
 ```
@@ -68,26 +69,27 @@ with vlm.intervene(
     "block",
     layer=16,
     operation="add",
-    value=direction,  # a torch.Tensor on the activation hidden dimension
+    value=direction,
     positions="last",
     scope="every_forward",
 ):
     output_ids = vlm.generate(inputs, max_new_tokens=32)
 ```
 
-Supported components are `block`, `attention`, and `mlp`. Position selectors are `last`, `all`, or explicit token indices. `capture` records the first invocation of each selected module and stores the tensor at `cache[layer]`.
+Supported components are `block`, `attention`, and `mlp`. Position selectors are `last`, `all`, or explicit token indices. `capture` records the first invocation of each selected module.
 
 Intervention operations:
-- `add`: `h + scale * value`.
-- `replace`: substitute the selected activation with `value`.
-- `project_out`: `h - scale * dot(h, value) / dot(value, value) * value`.
+
+- `add`: add a scaled direction to the selected activation.
+- `replace`: replace the selected activation.
+- `project_out`: remove the projection onto a direction.
 - `zero`: set the selected activation to zero.
 
-The value tensor must broadcast to the selected activation shape. `scale` is supported only by `add` and `project_out`. `first_forward` applies once per target layer (normally prompt prefill with cached generation); `every_forward` reapplies on every module invocation, including decoding. Nested hooks execute in registration order: enter intervention before capture to capture the edited activation, or capture before intervention to record the original activation. Hooks are removed when the context exits, including when an exception occurs. Captured tensors retain their autograd graph; detach them explicitly when graph retention is not needed.
+Values must broadcast to the selected activation shape. `scale` applies to `add` and `project_out`. `first_forward` intervenes once per target layer; `every_forward` intervenes on every invocation, including decoding. Nested hooks run in registration order and are removed when the context exits. Captured tensors retain their autograd graph; detach them when graph retention is unnecessary.
 
 ## Representation
 
-Representation operations are pure PyTorch functions and do not train a classifier:
+Representation helpers are pure PyTorch operations; they do not train a classifier.
 
 ```python
 from vlmbox import (
@@ -100,18 +102,15 @@ from vlmbox import (
     projection_length,
 )
 
-# Capture two hidden-state conditions at two decoder layers.
 with vlm.capture("block", layers=[16, 20], positions="last") as positive_cache:
     vlm.generate(positive_inputs, max_new_tokens=1)
 with vlm.capture("block", layers=[16, 20], positions="last") as negative_cache:
     vlm.generate(negative_inputs, max_new_tokens=1)
 
-# Directions point from the negative condition toward the positive condition.
 direction_16 = mean_difference(positive_cache[16], negative_cache[16], dim=0)
 direction_20 = mean_difference(positive_cache[20], negative_cache[20], dim=0)
 unit_direction = normalize_direction(direction_16)
 
-# Analyze activation projection and cross-layer direction geometry.
 coefficient = projection_coefficient(positive_cache[16], unit_direction)
 signed_length = projection_length(positive_cache[16], unit_direction)
 component = project(positive_cache[16], unit_direction)
@@ -119,17 +118,13 @@ similarity = cosine_similarity(direction_16, direction_20)
 theta_degrees = angle(direction_16, direction_20, degrees=True)
 ```
 
-`mean_difference(positive, negative)` computes the difference between independent sample means; sample counts may differ. It is also equal to the mean of pairwise differences when the two sample sets are aligned and have the same size, so VLMBox exposes only this one aggregate direction operation. It uses the `positive - negative` sign convention and reduces the sample dimension (`dim=0` by default). `normalize_direction` normalizes along the feature dimension (`dim=-1` by default).
+`mean_difference(positive, negative)` computes the difference between independent sample means; sample counts may differ. It uses the `positive - negative` sign convention and reduces the sample dimension (`dim=0` by default). When two aligned sample sets have the same size, this equals the mean of their pairwise differences. `normalize_direction` normalizes along the feature dimension (`dim=-1` by default).
 
-`projection_coefficient` returns `dot(hidden, direction) / dot(direction, direction)`. `projection_length` returns the signed scalar projection onto a unit direction, and `project` returns the corresponding vector component. `cosine_similarity` returns cosine similarity, while `angle` returns radians by default or degrees with `degrees=True`. Geometry operations support PyTorch broadcasting and use float32 accumulation for fp16/bf16 inputs. Zero directions are rejected rather than silently producing NaNs.
+`projection_coefficient` returns `dot(hidden, direction) / dot(direction, direction)`. `projection_length` returns the signed scalar projection onto a unit direction, and `project` returns the corresponding vector component. `cosine_similarity` and `angle` compute vector similarity and angular distance. Geometry operations support PyTorch broadcasting and use float32 accumulation for fp16/bf16 inputs. Zero directions are rejected.
 
-## Research example: paired-prompt steering
+### Paired-prompt steering example
 
-The paired-prompt probe is a small end-to-end example of VLMBox's public research APIs. It captures the last-token decoder activation during prompt prefill for two instructions over the same image, extracts a training-free mean-difference direction, then applies that direction during generation at several intervention scales.
-
-The default synthetic image contains a red square and a blue circle. The positive and negative prompts request `RED` and `BLUE`, while the task prompt asks for the circle's color. This makes the experiment easy to inspect, but it is only an API and causal-intervention sanity probe: one image and one prompt pair do not establish general steering effectiveness.
-
-Run it on a CUDA GPU:
+The example demonstrates a complete training-free workflow: capture two prompt-conditioned activations over the same image, extract a mean-difference direction, then apply it during generation at several scales. Its synthetic red-square/blue-circle task is an API sanity probe, not evidence of general steering effectiveness.
 
 ```bash
 uv run python examples/paired_prompt_steering.py \
@@ -137,11 +132,11 @@ uv run python examples/paired_prompt_steering.py \
   --scales 0.5,1,2,4
 ```
 
-Use `--image` to supply another image, `--layer` to select a decoder layer, and `--scope first_forward` to compare one-shot prefill intervention with persistent intervention. Pass `--local-files-only` when the checkpoint is already cached and network access should be prohibited. The JSON result includes baseline and steered text plus the measured prefill activation-delta norm, projection, and cosine similarity. These metrics describe the first prompt-prefill forward pass, not every decode step. Low-precision model execution introduces quantization error, so these measurements should be interpreted with appropriate numerical tolerance.
+Use `--image` to provide an image, `--layer` to select a decoder layer, and `--scope first_forward` to compare prefill-only and persistent intervention. Use `--local-files-only` when the checkpoint is already cached.
 
 ## Image
 
-Image helpers are architecture-independent and use Pillow. They return new RGB images and do not mutate their inputs:
+Image helpers are architecture-independent and use Pillow. They return new RGB images without mutating their inputs:
 
 ```python
 from PIL import Image
@@ -153,11 +148,73 @@ patch = crop_image(image, (0, 0, 192, 192))  # (left, top, right, bottom)
 composed = place_patch(image, patch, (32, 32))  # (left, top), no implicit resize
 ```
 
-`crop_image` uses half-open pixel coordinates and rejects empty or out-of-bounds boxes. `place_patch` requires the entire patch to fit inside the base image. An optional same-size `L` or `1` mask blends the patch into the base (`0` keeps the base; `255` replaces it). `to_rgb` follows Pillow conversion semantics and discards an existing alpha channel rather than compositing it.
+`crop_image` uses half-open pixel coordinates and rejects empty or out-of-bounds boxes. `place_patch` requires the patch to fit inside the base image. An optional same-size `L` or `1` mask blends the patch into the base. `to_rgb` follows Pillow conversion semantics and discards an existing alpha channel rather than compositing it.
+
+## Universal image training
+
+VLMBox currently supports **universal** image optimization only: one trainable image parameter is shared across all samples in a run. It does not implement per-image optimization.
+
+- `UniversalPerturbation` learns one full-canvas RGB perturbation shared by every sample and constrained by an L-infinity bound `epsilon`.
+- `UniversalPatch` learns one RGB patch shared by every sample and places it at one fixed canvas location.
+- `ImageTrainer` manages batching, model freezing, forward/backward passes, optimizer updates, and projection back into the parameter's feasible range.
+
+### Objective and Trainer
+
+`ImageTrainer` is task-agnostic. Its `objective` argument accepts either a function or any callable object with the signature:
+
+```python
+def objective(outputs, inputs, samples):
+    # Return one differentiable scalar Tensor.
+    ...
+```
+
+The objective must return one differentiable scalar tensor. It can use logits, hidden states, or other model outputs. Pass model-specific forward options through `forward_kwargs`, for example `{"output_hidden_states": True}` for a hidden-state objective.
+
+A typical setup looks like this:
+
+```python
+from vlmbox import ImageTrainer, UniversalPatch
+
+patch = UniversalPatch(
+    canvas_size=(224, 224),
+    size=(48, 48),
+    position="bottom_right",
+)
+trainer = ImageTrainer(vlm, patch, objective, learning_rate=1e-3)
+history = trainer.fit(samples, max_steps=500, batch_size=2, seed=42)
+```
+
+For hidden-state objectives, pass `forward_kwargs={"output_hidden_states": True}` to `fit()`.
+
+A new loss does **not** require a new Trainer. Implement the objective in the research project and pass it to `ImageTrainer`. VLMBox intentionally does not bundle task-specific losses or method-specific Trainers. A custom Trainer is only warranted when a project needs a genuinely different optimization loop, not merely a different loss.
+
+### Data and preprocessing
+
+Each `ImageSample` contains an RGB float image tensor in `[0, 1]`, a user prompt, and optional system prompt or teacher-forced target text. All images in one run must share the same `(height, width)`. Either every sample provides target text or none does. When target text is present, it is appended as an assistant turn; the objective is responsible for selecting the target-token positions used by its loss.
+
+`VLM.prepare_differentiable()` accepts Tensor image content in one conversation or a batch of conversations. It uses the model's native Transformers processor, with rescaling disabled because inputs are already in `[0, 1]`. Native resizing, cropping, patchification, splitting, normalization, and padding follow each model processor's own configuration; VLMBox does not override these settings.
+
+Image preprocessing runs on CPU so the configured native resampling path is preserved. The processed tensors are then moved to the VLM input device without detaching the autograd graph. The recommended setup keeps source images and universal image parameters on CPU while the VLM runs on CUDA. `VLM.forward()` is autograd-enabled; `generate()` is inference-oriented.
+
+During `fit()`, the Trainer freezes VLM parameters and switches the model to evaluation mode, then restores their original `requires_grad` flags and training mode. Only the universal image parameter is optimized. The default optimizer is Adam; `optimizer_cls` and `optimizer_kwargs` can be supplied when constructing the Trainer.
+
+### Runnable example
+
+This example uses teacher-forced assistant-target cross-entropy and verifies that the prompt-only token sequence is an exact prefix of the prompt-plus-target sequence. It prepares a fixed square canvas before the model's native processor runs.
+
+```bash
+uv run python examples/universal_image_optimization.py \
+  --image-dir ./images \
+  --parameterization patch \
+  --steps 100 \
+  --batch-size 2
+```
+
+Use `--parameterization perturbation` for a universal L-infinity-bounded perturbation, or `patch` for a fixed-position patch. The default model is `HuggingFaceTB/SmolVLM-500M-Instruct`; pass `--model-id` to select another supported model. The optimized parameter and step history are saved to the requested `.pt` output.
 
 ## Generation
 
-`VLM.generate()` remains a thin pass-through to Transformers. Use `generate_trace()` when a structured record of the generation process is needed:
+`VLM.generate()` is a thin pass-through to Transformers. Use `generate_trace()` when a structured record of generation is needed:
 
 ```python
 trace = vlm.generate_trace(
@@ -176,17 +233,15 @@ decode_state = trace.steps[1].hidden_states[16]
 print(trace.finish_reasons)
 ```
 
-`GenerationTrace` stores the returned sequences, prompt length, decoded text (when requested), per-sequence finish reasons, and one `GenerationStep` per generated token. Step zero is the prompt-prefill forward pass; later steps are decode passes. Each step's `token_ids` are the next tokens selected from that pass. Its hidden states describe the prompt or preceding input token(s), not the selected token itself. Hidden-state layer indices are zero-based decoder indices. `decode` denotes later generation calls; with `use_cache=False`, those calls may still process the full prefix.
+`GenerationTrace` stores generated sequences, prompt length, optional decoded text, per-sequence finish reasons, and one `GenerationStep` per generated token. Step zero is prompt prefill; later steps are autoregressive decode. A step's `token_ids` are the tokens selected from that forward pass, while its hidden states describe the prompt or preceding input tokens.
 
-Logits and hidden states are disabled by default to avoid retaining large GPU tensors. `capture_logits=True` stores raw, unprocessed next-token logits. `capture_hidden_states=True` requires an explicit `hidden_state_layers` selection, preventing accidental retention of every layer. The trace structure is immutable, while tensor payloads remain ordinary PyTorch tensors. Beam-search internal traces are currently rejected because beam histories need explicit alignment.
+Logits and hidden states are disabled by default to avoid retaining large GPU tensors. `capture_hidden_states=True` requires an explicit `hidden_state_layers` selection. Hidden-state indices are zero-based decoder-layer indices. Beam-search internal traces are currently rejected because beam histories need explicit alignment. `generate_trace()` currently supports decoder-only models.
 
-The Transformers 5.22.1 generation output does not expose a standard finish-reason field. VLMBox infers `eos` only when an unambiguous generated EOS token is present and `length` when the effective explicit length limit is reached without a custom stopping condition; otherwise it reports `unknown`. EOS IDs shared with padding or forced-EOS configuration are treated as ambiguous. This is intentionally conservative.
+Transformers does not expose a standard finish-reason field. VLMBox reports `eos` or `length` only when the returned sequence makes the reason unambiguous; otherwise it reports `unknown`.
 
-`generate_trace()` currently supports decoder-only models. Encoder-decoder models are rejected because the source prompt length and decoder sequence length are not interchangeable.
+## Reproducibility
 
-## Repro
-
-Set the RNG seeds for Python, NumPy's legacy global RNG, and PyTorch CPU/CUDA generators:
+Set RNG seeds for Python, NumPy's legacy global RNG, and PyTorch CPU/CUDA generators:
 
 ```python
 from vlmbox.repro import set_seed
@@ -197,14 +252,28 @@ set_seed(42, deterministic=True)  # opt in to deterministic PyTorch algorithms
 
 `set_seed()` accepts seeds from 0 through `2**32 - 1`. Deterministic mode enables PyTorch deterministic algorithms, enables cuDNN deterministic mode, and disables cuDNN benchmarking. On CUDA systems, an unset `CUBLAS_WORKSPACE_CONFIG` is set to `:4096:8` before CUDA initialization; an existing non-empty value is preserved. If CUDA is already initialized while the variable is unset, the function raises an error and asks you to restart the process. `warn_only=True` changes unsupported deterministic operations from errors to warnings. TF32 settings are not modified.
 
-Models are resolved through ModelScope's default cache. `VLM.from_pretrained()` accepts a ModelScope model ID only; pass `local_files_only=True` to prohibit downloads and require a complete local cache. The runtime uses `AutoProcessor` and `AutoModelForMultimodalLM`, with `dtype="auto"`, `device_map="auto"`, and fixed `trust_remote_code=True`. Only load model repositories whose code you trust.
+## Model loading and compatibility
 
-The generic `TransformersAdapter` has been validated against Qwen2.5-VL-3B, InternVL3.5-2B-HF, and SmolVLM-500M. GPU smoke tests are the required runtime validation path; CPU-only tests are limited to isolated unit tests.
+Models are resolved through ModelScope's default cache. `VLM.from_pretrained()` accepts a ModelScope model ID; pass `local_files_only=True` to prohibit downloads and require a complete local cache. VLMBox uses `AutoProcessor` and `AutoModelForMultimodalLM`, with `dtype="auto"`, `device_map="auto"`, and fixed `trust_remote_code=True`. Only load repositories whose code you trust.
+
+The generic `TransformersAdapter` has GPU integration coverage for Qwen2.5-VL-3B, InternVL3.5-2B-HF, and SmolVLM-500M. Other models may work when their language-decoder module layout matches the adapter's supported patterns.
 
 ## Development
 
 ```bash
 export UV_PROJECT_ENVIRONMENT="$HOME/.venvs/VLMBox"
-uv run pytest
 uv run ruff check .
+uv run pytest -q
+```
+
+Run real-model integration tests when the three checkpoints are already present in the ModelScope cache:
+
+```bash
+VLMBOX_RUN_GPU_INTEGRATION=1 uv run pytest tests/integration -q
+```
+
+Build the wheel and source distribution with:
+
+```bash
+uv build
 ```
