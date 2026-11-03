@@ -58,75 +58,9 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  publish-testpypi:
-    name: Publish to TestPyPI
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: testpypi
-      url: https://test.pypi.org/p/vlmbox
-    permissions:
-      id-token: write
-    steps:
-      - name: Download distributions
-        uses: actions/download-artifact@v8
-        with:
-          name: python-package-distributions
-          path: dist/
-
-      - name: Publish distributions
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
-
-  verify-testpypi:
-    name: Verify TestPyPI upload
-    needs: publish-testpypi
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-
-      - name: Download the published wheel
-        env:
-          PACKAGE_VERSION: ${{ github.ref_name }}
-        run: |
-          version="${PACKAGE_VERSION#v}"
-          python -m pip download \
-            --no-deps \
-            --only-binary=:all: \
-            --index-url https://test.pypi.org/simple/ \
-            --dest dist/ \
-            "vlmbox==${version}"
-
-      - name: Verify wheel archive and metadata
-        run: |
-          python - <<'PY'
-          from email.parser import Parser
-          from pathlib import Path
-          from zipfile import ZipFile
-
-          wheels = list(Path("dist").glob("*.whl"))
-          assert len(wheels) == 1, wheels
-          with ZipFile(wheels[0]) as archive:
-              assert archive.testzip() is None
-              metadata_path = next(
-                  name for name in archive.namelist()
-                  if name.endswith(".dist-info/METADATA")
-              )
-              metadata = Parser().parsestr(archive.read(metadata_path).decode())
-          assert metadata["Name"] == "vlmbox"
-          assert metadata["License-Expression"] == "MIT"
-          print(f"Verified {wheels[0].name}")
-          PY
-
   publish-pypi:
     name: Publish to PyPI
-    needs: verify-testpypi
+    needs: build
     runs-on: ubuntu-latest
     environment:
       name: pypi
