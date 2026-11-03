@@ -17,14 +17,28 @@ VLMBox provides reusable model-inspection and universal-image-optimization primi
 
 ## Installation
 
-VLMBox targets Python 3.11+ and uses a CUDA 13.0 PyTorch build for NVIDIA RTX 3090 (Ampere) and RTX 4090 (Ada). The supported Linux research machines require an NVIDIA driver version 580 or newer. Use a machine-local environment rather than placing `.venv` on the shared workspace:
+### Install from PyPI
+
+```bash
+python -m pip install vlmbox
+```
+
+The PyPI package declares a compatible PyTorch version range but does not force a particular CUDA build. If you need a specific accelerator build, install the matching PyTorch version for your platform first, then install VLMBox. The optional `examples` extra installs torchvision for the runnable image-optimization example:
+
+```bash
+python -m pip install "vlmbox[examples]"
+```
+
+### Development environment
+
+The repository's `uv.lock` intentionally pins CUDA 13.0 PyTorch wheels for the lab's RTX 3090 and RTX 4090 machines. The supported Linux research machines require an NVIDIA driver version 580 or newer. Use a machine-local environment rather than placing `.venv` on the shared workspace:
 
 ```bash
 export UV_PROJECT_ENVIRONMENT="$HOME/.venvs/VLMBox"
-uv sync --locked --extra dev
+uv sync --locked --extra dev --extra examples
 ```
 
-The Tsinghua PyPI mirror and PyTorch CUDA 13.0 index are declared in `pyproject.toml`; `uv.lock` pins the resolved wheels. Use the same commands on each machine. Do not mutate this environment with a separate CPU-only PyTorch installation, pip, or Conda.
+The Tsinghua PyPI mirror and PyTorch CUDA 13.0 index are declared in `pyproject.toml`; `uv.lock` pins the resolved wheels. Use the same commands on each lab machine. Do not mutate this environment with a separate CPU-only PyTorch installation, pip, or Conda.
 
 ## Quick start
 
@@ -277,3 +291,9 @@ Build the wheel and source distribution with:
 ```bash
 uv build
 ```
+
+## License
+
+VLMBox is licensed under the MIT License. See [LICENSE](LICENSE) for the full text.
+
+Maintainers can find release and Trusted Publishing instructions in the repository's `RELEASING.md`.

@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.12'",
@@ -1803,7 +1803,6 @@ dependencies = [
     { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "pillow" },
     { name = "torch" },
-    { name = "torchvision" },
     { name = "transformers" },
 ]
 
@@ -1811,6 +1810,9 @@ dependencies = [
 dev = [
     { name = "pytest" },
     { name = "ruff" },
+]
+examples = [
+    { name = "torchvision" },
 ]
 
 [package.metadata]
@@ -1821,8 +1823,8 @@ requires-dist = [
     { name = "pillow", specifier = ">=10.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.14" },
-    { name = "torch", specifier = "==2.14.1+cu130", index = "https://download.pytorch.org/whl/cu130" },
-    { name = "torchvision", specifier = "==0.29.1+cu130", index = "https://download.pytorch.org/whl/cu130" },
+    { name = "torch", specifier = ">=2.14.1,<2.15", index = "https://download.pytorch.org/whl/cu130" },
+    { name = "torchvision", marker = "extra == 'examples'", specifier = ">=0.29.1,<0.30", index = "https://download.pytorch.org/whl/cu130" },
     { name = "transformers", specifier = ">=5.22.1,<6" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dev", "examples"]
