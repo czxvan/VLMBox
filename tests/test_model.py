@@ -63,6 +63,7 @@ class FakeAutoModel:
 
 def install_fake_dependencies(monkeypatch):
     downloaded = []
+    download_options = []
 
     modelscope = types.ModuleType("modelscope")
     modelscope.__path__ = []
@@ -70,8 +71,9 @@ def install_fake_dependencies(monkeypatch):
     hub.__path__ = []
     snapshot_module = types.ModuleType("modelscope.hub.snapshot_download")
 
-    def snapshot_download(model_id):
+    def snapshot_download(model_id, **kwargs):
         downloaded.append(model_id)
+        download_options.append(kwargs)
         return "/model-cache/fake-model"
 
     snapshot_module.snapshot_download = snapshot_download
@@ -91,17 +93,18 @@ def install_fake_dependencies(monkeypatch):
 
     transformers.AutoModelForMultimodalLM = AutoModel
     monkeypatch.setitem(sys.modules, "transformers", transformers)
-    return downloaded, AutoModel
+    return downloaded, AutoModel, download_options
 
 
 def test_from_pretrained_uses_modelscope_and_multimodal_transformers(monkeypatch) -> None:
-    downloaded, auto_model = install_fake_dependencies(monkeypatch)
+    downloaded, auto_model, download_options = install_fake_dependencies(monkeypatch)
     FakeProcessor.calls.clear()
     auto_model.calls.clear()
 
     vlm = VLM.from_pretrained("Org/Model")
 
     assert downloaded == ["Org/Model"]
+    assert download_options == [{"local_files_only": False}]
     assert vlm.model_id == "Org/Model"
     assert vlm.model_path == "/model-cache/fake-model"
     assert vlm.model.training is False
@@ -116,7 +119,7 @@ def test_from_pretrained_uses_modelscope_and_multimodal_transformers(monkeypatch
 
 
 def test_remote_code_is_enabled_for_processor_and_model(monkeypatch) -> None:
-    _, auto_model = install_fake_dependencies(monkeypatch)
+    _, auto_model, _ = install_fake_dependencies(monkeypatch)
     FakeProcessor.calls.clear()
     auto_model.calls.clear()
 
@@ -124,6 +127,22 @@ def test_remote_code_is_enabled_for_processor_and_model(monkeypatch) -> None:
 
     assert FakeProcessor.calls[0][1]["trust_remote_code"] is True
     assert auto_model.calls[0][1]["trust_remote_code"] is True
+
+
+def test_from_pretrained_can_require_a_local_cache(monkeypatch) -> None:
+    downloaded, _auto_model, download_options = install_fake_dependencies(monkeypatch)
+
+    vlm = VLM.from_pretrained("Org/Model", local_files_only=True)
+
+    assert downloaded == ["Org/Model"]
+    assert download_options == [{"local_files_only": True}]
+    assert vlm.model_path == "/model-cache/fake-model"
+
+
+@pytest.mark.parametrize("value", [1, None, "true"])
+def test_from_pretrained_validates_local_files_only(value) -> None:
+    with pytest.raises(TypeError, match="local_files_only must be a bool"):
+        VLM.from_pretrained("Org/Model", local_files_only=value)
 
 
 @pytest.mark.parametrize("model_id", ["", "   ", "/tmp/local-model"])

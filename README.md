@@ -123,6 +123,22 @@ theta_degrees = angle(direction_16, direction_20, degrees=True)
 
 `projection_coefficient` returns `dot(hidden, direction) / dot(direction, direction)`. `projection_length` returns the signed scalar projection onto a unit direction, and `project` returns the corresponding vector component. `cosine_similarity` returns cosine similarity, while `angle` returns radians by default or degrees with `degrees=True`. Geometry operations support PyTorch broadcasting and use float32 accumulation for fp16/bf16 inputs. Zero directions are rejected rather than silently producing NaNs.
 
+## Research example: paired-prompt steering
+
+The paired-prompt probe is a small end-to-end example of VLMBox's public research APIs. It captures the last-token decoder activation during prompt prefill for two instructions over the same image, extracts a training-free mean-difference direction, then applies that direction during generation at several intervention scales.
+
+The default synthetic image contains a red square and a blue circle. The positive and negative prompts request `RED` and `BLUE`, while the task prompt asks for the circle's color. This makes the experiment easy to inspect, but it is only an API and causal-intervention sanity probe: one image and one prompt pair do not establish general steering effectiveness.
+
+Run it on a CUDA GPU:
+
+```bash
+uv run python examples/paired_prompt_steering.py \
+  --model-id Qwen/Qwen2.5-VL-3B-Instruct \
+  --scales 0.5,1,2,4
+```
+
+Use `--image` to supply another image, `--layer` to select a decoder layer, and `--scope first_forward` to compare one-shot prefill intervention with persistent intervention. Pass `--local-files-only` when the checkpoint is already cached and network access should be prohibited. The JSON result includes baseline and steered text plus the measured prefill activation-delta norm, projection, and cosine similarity. These metrics describe the first prompt-prefill forward pass, not every decode step. Low-precision model execution introduces quantization error, so these measurements should be interpreted with appropriate numerical tolerance.
+
 ## Image
 
 Image helpers are architecture-independent and use Pillow. They return new RGB images and do not mutate their inputs:
@@ -181,7 +197,7 @@ set_seed(42, deterministic=True)  # opt in to deterministic PyTorch algorithms
 
 `set_seed()` accepts seeds from 0 through `2**32 - 1`. Deterministic mode enables PyTorch deterministic algorithms, enables cuDNN deterministic mode, and disables cuDNN benchmarking. On CUDA systems, an unset `CUBLAS_WORKSPACE_CONFIG` is set to `:4096:8` before CUDA initialization; an existing non-empty value is preserved. If CUDA is already initialized while the variable is unset, the function raises an error and asks you to restart the process. `warn_only=True` changes unsupported deterministic operations from errors to warnings. TF32 settings are not modified.
 
-Models are downloaded through ModelScope's default cache. `VLM.from_pretrained()` accepts a ModelScope model ID only. The runtime uses `AutoProcessor` and `AutoModelForMultimodalLM`, with `dtype="auto"`, `device_map="auto"`, and fixed `trust_remote_code=True`. Only load model repositories whose code you trust.
+Models are resolved through ModelScope's default cache. `VLM.from_pretrained()` accepts a ModelScope model ID only; pass `local_files_only=True` to prohibit downloads and require a complete local cache. The runtime uses `AutoProcessor` and `AutoModelForMultimodalLM`, with `dtype="auto"`, `device_map="auto"`, and fixed `trust_remote_code=True`. Only load model repositories whose code you trust.
 
 The generic `TransformersAdapter` has been validated against Qwen2.5-VL-3B, InternVL3.5-2B-HF, and SmolVLM-500M. GPU smoke tests are the required runtime validation path; CPU-only tests are limited to isolated unit tests.
 

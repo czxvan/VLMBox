@@ -147,12 +147,20 @@ class VLM:
         self.adapter = adapter
 
     @classmethod
-    def from_pretrained(cls, model_id: str) -> VLM:
-        """Download a ModelScope checkpoint and load it with Transformers.
+    def from_pretrained(
+        cls,
+        model_id: str,
+        *,
+        local_files_only: bool = False,
+    ) -> VLM:
+        """Resolve a ModelScope checkpoint and load it with Transformers.
 
-        The public API intentionally accepts only a ModelScope model ID. Device
-        placement and dtype use fixed internal defaults to keep the interface small.
+        The public API intentionally accepts only a ModelScope model ID. Set
+        ``local_files_only=True`` to require a complete local cache and prohibit
+        ModelScope downloads. Device placement and dtype use fixed internal defaults.
         """
+        if not isinstance(local_files_only, bool):
+            raise TypeError("local_files_only must be a bool")
         if not isinstance(model_id, str) or not model_id.strip():
             raise ValueError("model_id must be a non-empty ModelScope model ID")
         if Path(model_id).is_absolute() or Path(model_id).exists():
@@ -176,7 +184,9 @@ class VLM:
                 "Transformers 5.x with AutoModelForMultimodalLM is required."
             ) from exc
 
-        model_path = str(snapshot_download(model_id.strip()))
+        model_path = str(
+            snapshot_download(model_id.strip(), local_files_only=local_files_only)
+        )
         processor = AutoProcessor.from_pretrained(
             model_path,
             trust_remote_code=True,
