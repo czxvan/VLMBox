@@ -182,6 +182,9 @@ def test_prepare_and_generate_delegate_to_processor_and_model() -> None:
     assert batch_prepared["messages"] == batch_messages
     assert batch_prepared["processor_kwargs"] == {"padding": True}
 
+    templated = vlm.prepare(messages, chat_template_kwargs={"enable_thinking": False})
+    assert templated["enable_thinking"] is False
+
     result = vlm.generate({"input_ids": torch.tensor([[1, 2]])}, max_new_tokens=3)
     assert result["input_ids"].tolist() == [[1, 2]]
     assert result["max_new_tokens"] == 3
@@ -208,8 +211,11 @@ def test_prepare_differentiable_preserves_gradient_and_uses_processor_kwargs() -
         }
     ]
 
-    prepared = vlm.prepare_differentiable(messages)
+    prepared = vlm.prepare_differentiable(
+        messages, chat_template_kwargs={"enable_thinking": False}
+    )
     assert prepared["processor_kwargs"] == {"padding": True, "do_rescale": False}
+    assert prepared["enable_thinking"] is False
     prepared_image = prepared["messages"][0][0]["content"][0]["image"]
     prepared_image.square().mean().backward()
 

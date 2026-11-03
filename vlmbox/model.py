@@ -270,8 +270,16 @@ class VLM:
     def prepare(
         self,
         messages: Sequence[Mapping[str, Any]] | Sequence[Sequence[Mapping[str, Any]]],
+        *,
+        chat_template_kwargs: Mapping[str, Any] | None = None,
     ) -> Any:
-        """Prepare one conversation or a batch with left padding for generation."""
+        """Prepare one conversation or a batch with left padding for generation.
+
+        ``chat_template_kwargs`` passes model-specific variables to the native
+        Transformers chat template, for example ``{"enable_thinking": False}.
+        """
+        if chat_template_kwargs is not None and not isinstance(chat_template_kwargs, Mapping):
+            raise TypeError("chat_template_kwargs must be a mapping or None")
         return self.processor.apply_chat_template(
             messages,
             tokenize=True,
@@ -279,6 +287,7 @@ class VLM:
             return_dict=True,
             return_tensors="pt",
             processor_kwargs={"padding": True},
+            **dict(chat_template_kwargs or {}),
         )
 
     def prepare_differentiable(
@@ -286,6 +295,7 @@ class VLM:
         messages: Sequence[Mapping[str, Any]] | Sequence[Sequence[Mapping[str, Any]]],
         *,
         add_generation_prompt: bool = True,
+        chat_template_kwargs: Mapping[str, Any] | None = None,
     ) -> Any:
         """Prepare Tensor images through the native processor without detaching gradients.
 
@@ -298,6 +308,8 @@ class VLM:
         """
         if not isinstance(add_generation_prompt, bool):
             raise TypeError("add_generation_prompt must be a bool")
+        if chat_template_kwargs is not None and not isinstance(chat_template_kwargs, Mapping):
+            raise TypeError("chat_template_kwargs must be a mapping or None")
         if (
             not isinstance(messages, Sequence)
             or isinstance(messages, (str, bytes))
@@ -369,6 +381,7 @@ class VLM:
             return_dict=True,
             return_tensors="pt",
             processor_kwargs={"padding": True, "do_rescale": False},
+            **dict(chat_template_kwargs or {}),
         )
         return self._move_inputs_to_device(inputs)
 
