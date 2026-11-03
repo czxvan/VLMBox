@@ -12,7 +12,7 @@ VLMBox focuses on model internals and research operations rather than serving or
 - **Representation** — training-free direction extraction and representation geometry.
 - **Image** — architecture-independent RGB conversion, resizing, cropping, and patch placement.
 - **Generation** — structured generation results and opt-in internal traces.
-- **Repro** — deterministic execution and run metadata (under development).
+- **Repro** — random seed control and optional deterministic execution.
 
 ## Installation
 
@@ -167,6 +167,19 @@ Logits and hidden states are disabled by default to avoid retaining large GPU te
 The Transformers 5.22.1 generation output does not expose a standard finish-reason field. VLMBox infers `eos` only when an unambiguous generated EOS token is present and `length` when the effective explicit length limit is reached without a custom stopping condition; otherwise it reports `unknown`. EOS IDs shared with padding or forced-EOS configuration are treated as ambiguous. This is intentionally conservative.
 
 `generate_trace()` currently supports decoder-only models. Encoder-decoder models are rejected because the source prompt length and decoder sequence length are not interchangeable.
+
+## Repro
+
+Set the RNG seeds for Python, NumPy's legacy global RNG, and PyTorch CPU/CUDA generators:
+
+```python
+from vlmbox.repro import set_seed
+
+set_seed(42)  # seed only; leave deterministic backend settings unchanged
+set_seed(42, deterministic=True)  # opt in to deterministic PyTorch algorithms
+```
+
+`set_seed()` accepts seeds from 0 through `2**32 - 1`. Deterministic mode enables PyTorch deterministic algorithms, enables cuDNN deterministic mode, and disables cuDNN benchmarking. On CUDA systems, an unset `CUBLAS_WORKSPACE_CONFIG` is set to `:4096:8` before CUDA initialization; an existing non-empty value is preserved. If CUDA is already initialized while the variable is unset, the function raises an error and asks you to restart the process. `warn_only=True` changes unsupported deterministic operations from errors to warnings. TF32 settings are not modified.
 
 Models are downloaded through ModelScope's default cache. `VLM.from_pretrained()` accepts a ModelScope model ID only. The runtime uses `AutoProcessor` and `AutoModelForMultimodalLM`, with `dtype="auto"`, `device_map="auto"`, and fixed `trust_remote_code=True`. Only load model repositories whose code you trust.
 

@@ -18,9 +18,11 @@ from vlmbox.representation import (
     projection_coefficient,
     projection_length,
 )
+from vlmbox.repro import set_seed
 
 __all__ = [
     "VLM",
+    "set_seed",
     "FinishReason",
     "GenerationPhase",
     "GenerationStep",

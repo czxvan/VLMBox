@@ -1799,6 +1799,8 @@ source = { editable = "." }
 dependencies = [
     { name = "accelerate" },
     { name = "modelscope" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "pillow" },
     { name = "torch" },
     { name = "torchvision" },
@@ -1815,6 +1817,7 @@ dev = [
 requires-dist = [
     { name = "accelerate", specifier = ">=1.10" },
     { name = "modelscope", specifier = ">=1.40.2" },
+    { name = "numpy", specifier = ">=1.24" },
     { name = "pillow", specifier = ">=10.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.14" },
