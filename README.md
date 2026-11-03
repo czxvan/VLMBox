@@ -11,7 +11,7 @@ VLMBox focuses on model internals and research operations rather than serving or
 - **Activation** — context-managed capture and intervention on decoder blocks, attention, and MLP outputs.
 - **Representation** — training-free direction extraction and representation geometry.
 - **Image** — architecture-independent RGB conversion, resizing, cropping, and patch placement.
-- **Generation** — generation results and internal traces (planned).
+- **Generation** — structured generation results and opt-in internal traces.
 - **Repro** — deterministic execution and run metadata (under development).
 
 ## Installation
@@ -138,6 +138,35 @@ composed = place_patch(image, patch, (32, 32))  # (left, top), no implicit resiz
 ```
 
 `crop_image` uses half-open pixel coordinates and rejects empty or out-of-bounds boxes. `place_patch` requires the entire patch to fit inside the base image. An optional same-size `L` or `1` mask blends the patch into the base (`0` keeps the base; `255` replaces it). `to_rgb` follows Pillow conversion semantics and discards an existing alpha channel rather than compositing it.
+
+## Generation
+
+`VLM.generate()` remains a thin pass-through to Transformers. Use `generate_trace()` when a structured record of the generation process is needed:
+
+```python
+trace = vlm.generate_trace(
+    inputs,
+    max_new_tokens=32,
+    capture_logits=True,
+    capture_hidden_states=True,
+    hidden_state_layers=[8, 16, 24],
+    decode_text=True,
+)
+
+generated_ids = trace.generated_token_ids
+first_step_logits = trace.steps[0].logits
+prefill_state = trace.steps[0].hidden_states[16]
+decode_state = trace.steps[1].hidden_states[16]
+print(trace.finish_reasons)
+```
+
+`GenerationTrace` stores the returned sequences, prompt length, decoded text (when requested), per-sequence finish reasons, and one `GenerationStep` per generated token. Step zero is the prompt-prefill forward pass; later steps are decode passes. Each step's `token_ids` are the next tokens selected from that pass. Its hidden states describe the prompt or preceding input token(s), not the selected token itself. Hidden-state layer indices are zero-based decoder indices. `decode` denotes later generation calls; with `use_cache=False`, those calls may still process the full prefix.
+
+Logits and hidden states are disabled by default to avoid retaining large GPU tensors. `capture_logits=True` stores raw, unprocessed next-token logits. `capture_hidden_states=True` requires an explicit `hidden_state_layers` selection, preventing accidental retention of every layer. The trace structure is immutable, while tensor payloads remain ordinary PyTorch tensors. Beam-search internal traces are currently rejected because beam histories need explicit alignment.
+
+The Transformers 5.22.1 generation output does not expose a standard finish-reason field. VLMBox infers `eos` only when an unambiguous generated EOS token is present and `length` when the effective explicit length limit is reached without a custom stopping condition; otherwise it reports `unknown`. EOS IDs shared with padding or forced-EOS configuration are treated as ambiguous. This is intentionally conservative.
+
+`generate_trace()` currently supports decoder-only models. Encoder-decoder models are rejected because the source prompt length and decoder sequence length are not interchangeable.
 
 Models are downloaded through ModelScope's default cache. `VLM.from_pretrained()` accepts a ModelScope model ID only. The runtime uses `AutoProcessor` and `AutoModelForMultimodalLM`, with `dtype="auto"`, `device_map="auto"`, and fixed `trust_remote_code=True`. Only load model repositories whose code you trust.
 
