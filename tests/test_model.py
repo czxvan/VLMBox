@@ -42,6 +42,9 @@ class FakeModel(nn.Module):
 class FakeProcessor:
     calls = []
 
+    def __init__(self) -> None:
+        self.tokenizer = types.SimpleNamespace(padding_side="right")
+
     @classmethod
     def from_pretrained(cls, path, **kwargs):
         cls.calls.append((path, kwargs))
@@ -108,6 +111,7 @@ def test_from_pretrained_uses_modelscope_and_multimodal_transformers(monkeypatch
     assert vlm.model_id == "Org/Model"
     assert vlm.model_path == "/model-cache/fake-model"
     assert vlm.model.training is False
+    assert vlm.processor.tokenizer.padding_side == "left"
     assert len(vlm.adapter.layers) == 1
     assert FakeProcessor.calls == [("/model-cache/fake-model", {"trust_remote_code": True})]
     assert auto_model.calls == [
@@ -167,6 +171,16 @@ def test_prepare_and_generate_delegate_to_processor_and_model() -> None:
     assert prepared["messages"] == messages
     assert prepared["tokenize"] is True
     assert prepared["return_tensors"] == "pt"
+    assert prepared["processor_kwargs"] == {"padding": True}
+    assert processor.tokenizer.padding_side == "left"
+
+    batch_messages = [
+        [{"role": "user", "content": "short"}],
+        [{"role": "user", "content": "a longer prompt"}],
+    ]
+    batch_prepared = vlm.prepare(batch_messages)
+    assert batch_prepared["messages"] == batch_messages
+    assert batch_prepared["processor_kwargs"] == {"padding": True}
 
     result = vlm.generate({"input_ids": torch.tensor([[1, 2]])}, max_new_tokens=3)
     assert result["input_ids"].tolist() == [[1, 2]]
@@ -195,7 +209,7 @@ def test_prepare_differentiable_preserves_gradient_and_uses_processor_kwargs() -
     ]
 
     prepared = vlm.prepare_differentiable(messages)
-    assert prepared["processor_kwargs"] == {"do_rescale": False}
+    assert prepared["processor_kwargs"] == {"padding": True, "do_rescale": False}
     prepared_image = prepared["messages"][0][0]["content"][0]["image"]
     prepared_image.square().mean().backward()
 

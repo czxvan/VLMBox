@@ -6,6 +6,7 @@ import os
 import pytest
 import torch
 import torch.nn.functional as F
+from PIL import Image
 
 from vlmbox import VLM, ImageSample, ImageTrainer, UniversalPatch, UniversalPerturbation
 
@@ -26,13 +27,17 @@ pytestmark = [
 ]
 
 
-def _conversation(image: torch.Tensor, target: str | None = None) -> list[dict]:
+def _conversation(
+    image: Image.Image | torch.Tensor,
+    target: str | None = None,
+    prompt: str = "Describe this image in one word.",
+) -> list[dict]:
     messages = [
         {
             "role": "user",
             "content": [
                 {"type": "image", "image": image},
-                {"type": "text", "text": "Describe this image in one word."},
+                {"type": "text", "text": prompt},
             ],
         }
     ]
@@ -49,7 +54,7 @@ def _assert_native_processor_parity(vlm: VLM, image: torch.Tensor) -> None:
         add_generation_prompt=True,
         return_dict=True,
         return_tensors="pt",
-        processor_kwargs={"do_rescale": False},
+        processor_kwargs={"padding": True, "do_rescale": False},
     )
 
     expected_keys = {key for key, value in expected.items() if isinstance(value, torch.Tensor)}
@@ -70,6 +75,14 @@ def _assert_native_processor_parity(vlm: VLM, image: torch.Tensor) -> None:
     gradient = torch.autograd.grad(actual["pixel_values"].float().sum(), image)[0]
     assert bool(torch.isfinite(gradient).all().item())
     assert float(gradient.abs().sum().item()) > 0.0
+
+
+def _assert_left_padding(inputs) -> None:
+    mask = inputs["attention_mask"]
+    assert mask.shape[0] == 2
+    assert int(mask[0].sum()) < int(mask[1].sum())
+    assert int(mask[0, 0]) == 0
+    assert int(mask[1, 0]) == 1
 
 
 def _target_prefix_length(vlm: VLM, image: torch.Tensor) -> int:
@@ -108,6 +121,39 @@ def test_native_processor_parity_and_universal_training_gradients(model_id: str)
 
     if "SmolVLM" in model_id:
         assert vlm.processor.image_processor.do_image_splitting is True
+
+    short_prompt = "What is shown?"
+    long_prompt = (
+        "Describe every visible object, its color, location, shape, relative size, "
+        "and the overall composition in this picture."
+    )
+    pil_image = Image.new("RGB", (224, 224), "white")
+    prepared_batch = vlm.prepare(
+        [
+            _conversation(pil_image, prompt=short_prompt),
+            _conversation(pil_image.copy(), prompt=long_prompt),
+        ]
+    )
+    _assert_left_padding(prepared_batch)
+
+    tensor_images = [
+        torch.rand(3, 224, 224, dtype=torch.float32, requires_grad=True),
+        torch.rand(3, 224, 224, dtype=torch.float32, requires_grad=True),
+    ]
+    differentiable_batch = vlm.prepare_differentiable(
+        [
+            _conversation(tensor_images[0], prompt=short_prompt),
+            _conversation(tensor_images[1], prompt=long_prompt),
+        ]
+    )
+    _assert_left_padding(differentiable_batch)
+    batch_gradients = torch.autograd.grad(
+        differentiable_batch["pixel_values"].float().sum(), tensor_images
+    )
+    assert all(bool(torch.isfinite(gradient).all().item()) for gradient in batch_gradients)
+    assert all(float(gradient.abs().sum().item()) > 0.0 for gradient in batch_gradients)
+    del prepared_batch, differentiable_batch, tensor_images, batch_gradients, pil_image
+    gc.collect()
 
     for height, width in IMAGE_SIZES:
         image = torch.rand(3, height, width, dtype=torch.float32, requires_grad=True)

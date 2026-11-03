@@ -145,6 +145,11 @@ class VLM:
         self.model_path = model_path
         self.model = model
         self.processor = processor
+        tokenizer = getattr(processor, "tokenizer", None)
+        if tokenizer is None:
+            tokenizer = processor
+        if hasattr(tokenizer, "padding_side"):
+            tokenizer.padding_side = "left"
         self.adapter = adapter
 
     @classmethod
@@ -262,14 +267,18 @@ class VLM:
             self.adapter, component, layer, operation, value, scale, positions, scope
         )
 
-    def prepare(self, messages: list[dict[str, Any]]) -> Any:
-        """Apply the model's chat template and return tensor inputs."""
+    def prepare(
+        self,
+        messages: Sequence[Mapping[str, Any]] | Sequence[Sequence[Mapping[str, Any]]],
+    ) -> Any:
+        """Prepare one conversation or a batch with left padding for generation."""
         return self.processor.apply_chat_template(
             messages,
             tokenize=True,
             add_generation_prompt=True,
             return_dict=True,
             return_tensors="pt",
+            processor_kwargs={"padding": True},
         )
 
     def prepare_differentiable(
@@ -359,7 +368,7 @@ class VLM:
             add_generation_prompt=add_generation_prompt,
             return_dict=True,
             return_tensors="pt",
-            processor_kwargs={"do_rescale": False},
+            processor_kwargs={"padding": True, "do_rescale": False},
         )
         return self._move_inputs_to_device(inputs)
 
