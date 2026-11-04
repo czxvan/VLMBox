@@ -156,6 +156,21 @@ def _replace_first_tensor(output: object, transform) -> object:
     )
 
 
+def _move_transformers_output_capture_hooks_after(module: nn.Module) -> None:
+    """Keep Transformers' persistent output-capture hooks after active edits."""
+    hooks = module._forward_hooks
+    capture_hooks = [
+        (key, hook)
+        for key, hook in hooks.items()
+        if getattr(hook, "__module__", None) == "transformers.utils.output_capturing"
+        and getattr(hook, "__name__", None) == "output_capturing_hook"
+    ]
+    for key, _hook in capture_hooks:
+        hooks.pop(key)
+    for key, hook in capture_hooks:
+        hooks[key] = hook
+
+
 class ActivationCapture:
     """Capture the first output of selected decoder modules in a context."""
 
@@ -215,7 +230,9 @@ class ActivationIntervention:
 
     Add computes ``h + scale * value``; replace broadcasts ``value`` over the
     selected activations; project_out removes the component along ``value``;
-    zero sets the selected activations to zero.
+    zero sets the selected activations to zero. Normal nested-hook ordering is
+    preserved. Previously installed Transformers output-capture hooks are moved
+    behind the intervention so native traces observe the edited activation.
     """
 
     def __init__(
@@ -263,6 +280,7 @@ class ActivationIntervention:
         try:
             for _index, module in self._targets:
                 self._handles.append(module.register_forward_hook(self._make_hook()))
+                _move_transformers_output_capture_hooks_after(module)
         except Exception:
             self._remove_hooks()
             raise

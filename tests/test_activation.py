@@ -146,6 +146,27 @@ def test_every_forward_scope_is_persistent() -> None:
     assert torch.equal(second[:, -1, :], expected)
 
 
+def test_intervention_reorders_preinstalled_transformers_capture_hook() -> None:
+    vlm = make_vlm()
+    layer = vlm.model.language_model.layers[0]
+    captured = []
+
+    def output_capturing_hook(_module, _inputs, output):
+        captured.append(output[0].clone())
+        return output
+
+    output_capturing_hook.__module__ = "transformers.utils.output_capturing"
+    capture_handle = layer.register_forward_hook(output_capturing_hook)
+    value = torch.tensor([1.0, 0.0])
+
+    with vlm.intervene("block", 0, "add", value=value, positions="last"):
+        vlm.model(sample())
+    capture_handle.remove()
+
+    assert torch.equal(captured[0][:, :-1, :], sample()[:, :-1, :])
+    assert torch.equal(captured[0][:, -1, :], sample()[:, -1, :] + value)
+
+
 def test_intervention_preserves_auxiliary_tuple_outputs() -> None:
     vlm = make_vlm()
     layer = vlm.model.language_model.layers[0]
