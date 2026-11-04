@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,35 @@ from vlmbox.generation import (
     GenerationTrace,
     GenerationTraceError,
 )
+
+
+def _internvl_config_with_untied_embeddings(model_path: str, auto_config: Any) -> Any | None:
+    """Correct InternVL's omitted outer tying flag when its text model is untied.
+
+    Some InternVL checkpoints omit the top-level ``tie_word_embeddings`` field.
+    ``InternVLConfig`` defaults it to True even when the nested text config (for
+    example, Qwen3) defaults to untied embeddings. Preserve explicit checkpoint
+    settings and only supply a corrected config for this specific omission.
+    """
+    config_path = Path(model_path) / "config.json"
+    if not config_path.is_file():
+        return None
+
+    raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+    if raw_config.get("model_type") != "internvl":
+        return None
+    if "tie_word_embeddings" in raw_config:
+        return None
+
+    config = auto_config.from_pretrained(
+        model_path,
+        trust_remote_code=True,
+    )
+    text_config = getattr(config, "text_config", None)
+    if getattr(text_config, "tie_word_embeddings", None) is False:
+        config.tie_word_embeddings = False
+        return config
+    return None
 
 
 def _normalize_generation_layers(
@@ -184,7 +214,7 @@ class VLM:
             ) from exc
 
         try:
-            from transformers import AutoModelForMultimodalLM, AutoProcessor
+            from transformers import AutoConfig, AutoModelForMultimodalLM, AutoProcessor
         except ImportError as exc:
             raise ImportError(
                 "Transformers 5.x with AutoModelForMultimodalLM is required."
@@ -197,12 +227,15 @@ class VLM:
             model_path,
             trust_remote_code=True,
         )
-        model = AutoModelForMultimodalLM.from_pretrained(
-            model_path,
-            dtype="auto",
-            device_map="auto",
-            trust_remote_code=True,
-        )
+        model_kwargs = {
+            "dtype": "auto",
+            "device_map": "auto",
+            "trust_remote_code": True,
+        }
+        model_config = _internvl_config_with_untied_embeddings(model_path, AutoConfig)
+        if model_config is not None:
+            model_kwargs["config"] = model_config
+        model = AutoModelForMultimodalLM.from_pretrained(model_path, **model_kwargs)
 
         model.eval()
         adapter = TransformersAdapter(model)

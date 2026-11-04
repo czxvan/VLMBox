@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import types
 
@@ -54,6 +55,16 @@ class FakeProcessor:
         return {"messages": messages, **kwargs}
 
 
+class FakeAutoConfig:
+    calls = []
+    config = None
+
+    @classmethod
+    def from_pretrained(cls, path, **kwargs):
+        cls.calls.append((path, kwargs))
+        return cls.config
+
+
 class FakeAutoModel:
     calls = []
     instance = FakeModel()
@@ -85,6 +96,7 @@ def install_fake_dependencies(monkeypatch):
     monkeypatch.setitem(sys.modules, "modelscope.hub.snapshot_download", snapshot_module)
 
     transformers = types.ModuleType("transformers")
+    transformers.AutoConfig = FakeAutoConfig
     transformers.AutoProcessor = FakeProcessor
 
     class AutoModel(FakeAutoModel):
@@ -131,6 +143,70 @@ def test_remote_code_is_enabled_for_processor_and_model(monkeypatch) -> None:
 
     assert FakeProcessor.calls[0][1]["trust_remote_code"] is True
     assert auto_model.calls[0][1]["trust_remote_code"] is True
+
+
+def test_from_pretrained_corrects_omitted_internvl_tying_flag(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "model_type": "internvl",
+                "text_config": {"model_type": "qwen3"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    _, auto_model, _ = install_fake_dependencies(monkeypatch)
+    monkeypatch.setattr(
+        sys.modules["modelscope.hub.snapshot_download"],
+        "snapshot_download",
+        lambda *_args, **_kwargs: str(tmp_path),
+    )
+    FakeAutoConfig.calls.clear()
+    FakeAutoConfig.config = types.SimpleNamespace(
+        tie_word_embeddings=True,
+        text_config=types.SimpleNamespace(tie_word_embeddings=False),
+    )
+    auto_model.calls.clear()
+
+    VLM.from_pretrained("OpenGVLab/InternVL3_5-2B-HF")
+
+    assert FakeAutoConfig.calls == [
+        (str(tmp_path), {"trust_remote_code": True}),
+    ]
+    loaded_config = auto_model.calls[0][1]["config"]
+    assert loaded_config is FakeAutoConfig.config
+    assert loaded_config.tie_word_embeddings is False
+    assert loaded_config.text_config.tie_word_embeddings is False
+
+
+@pytest.mark.parametrize("top_level_value", [True, False])
+def test_from_pretrained_preserves_explicit_internvl_tying_flag(
+    tmp_path, monkeypatch, top_level_value
+) -> None:
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "internvl",
+                "tie_word_embeddings": top_level_value,
+                "text_config": {"model_type": "qwen3"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    _, auto_model, _ = install_fake_dependencies(monkeypatch)
+    monkeypatch.setattr(
+        sys.modules["modelscope.hub.snapshot_download"],
+        "snapshot_download",
+        lambda *_args, **_kwargs: str(tmp_path),
+    )
+    FakeAutoConfig.calls.clear()
+    auto_model.calls.clear()
+
+    VLM.from_pretrained("OpenGVLab/InternVL3_5-2B-HF")
+
+    assert FakeAutoConfig.calls == []
+    assert "config" not in auto_model.calls[0][1]
 
 
 def test_from_pretrained_can_require_a_local_cache(monkeypatch) -> None:

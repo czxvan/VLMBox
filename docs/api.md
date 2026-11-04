@@ -10,7 +10,7 @@ The symbols below are exported from the top-level `vlmbox` package unless otherw
 VLM.from_pretrained(model_id: str, *, local_files_only: bool = False) -> VLM
 ```
 
-Load a ModelScope checkpoint through Transformers. `model_id` must use the `namespace/model` form. Set `local_files_only=True` to require a complete local ModelScope cache. Model dtype and device placement currently use the internal `auto` defaults.
+Load a ModelScope checkpoint through Transformers. `model_id` must use the `namespace/model` form. Set `local_files_only=True` to require a complete local ModelScope cache. Model dtype and device placement currently use the internal `auto` defaults. For InternVL checkpoints that omit the top-level `tie_word_embeddings` field, VLMBox follows the nested text model setting when it specifies untied embeddings; explicit checkpoint settings are preserved.
 
 Useful properties:
 
