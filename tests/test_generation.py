@@ -93,7 +93,7 @@ def test_generate_trace_captures_selected_layers_and_raw_logits() -> None:
 
     assert model.generation_kwargs["return_dict_in_generate"] is True
     assert model.generation_kwargs["output_logits"] is True
-    assert model.generation_kwargs["output_hidden_states"] is True
+    assert model.generation_kwargs["output_hidden_states"] == (1,)
     assert model.generation_kwargs["max_new_tokens"] == 2
     assert torch.equal(trace.prompt_token_ids, inputs["input_ids"])
     assert torch.equal(trace.generated_token_ids, torch.tensor([[2, 0], [4, 5]]))
@@ -109,6 +109,141 @@ def test_generate_trace_captures_selected_layers_and_raw_logits() -> None:
     assert set(trace.steps[0].hidden_states) == {1}
     assert trace.steps[0].hidden_states[1].shape == (2, 2, 4)
     assert trace.steps[1].hidden_states[1].shape == (2, 1, 4)
+
+
+def test_generate_trace_uses_transformers_native_selected_layer_capture() -> None:
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    config = LlamaConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=4,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        max_position_embeddings=64,
+        bos_token_id=1,
+        eos_token_id=2,
+        pad_token_id=0,
+    )
+    model = LlamaForCausalLM(config).eval()
+    processor = FakeProcessor()
+    vlm = VLM(
+        model_id="Org/TinyLlama",
+        model_path="/model-cache/tiny-llama",
+        model=model,
+        processor=processor,
+        adapter=TransformersAdapter(model),
+    )
+
+    original_generate = model.generate
+    recorded = {}
+
+    def record_generate(**kwargs):
+        recorded["output_hidden_states"] = kwargs["output_hidden_states"]
+        output = original_generate(**kwargs)
+        recorded["output"] = output
+        return output
+
+    model.generate = record_generate
+    inputs = {"input_ids": torch.tensor([[1, 5, 6]])}
+    trace = vlm.generate_trace(
+        inputs,
+        capture_hidden_states=True,
+        hidden_state_layers=[1, 3],
+        max_new_tokens=3,
+        do_sample=False,
+    )
+
+    assert recorded["output_hidden_states"] == (1, 3)
+    raw_steps = recorded["output"].hidden_states
+    assert len(raw_steps) == len(trace.steps) == 3
+    for raw_step, trace_step in zip(raw_steps, trace.steps, strict=True):
+        assert len(raw_step) == len(model.model.layers)
+        assert raw_step[0] is None
+        assert raw_step[2] is None
+        assert isinstance(raw_step[1], torch.Tensor)
+        assert isinstance(raw_step[3], torch.Tensor)
+        assert torch.equal(trace_step.hidden_states[1], raw_step[1])
+        assert torch.equal(trace_step.hidden_states[3], raw_step[3])
+        assert set(trace_step.hidden_states) == {1, 3}
+
+
+def test_generate_trace_uses_native_selection_in_qwen25_vl() -> None:
+    from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
+        Qwen2_5_VLConfig,
+        Qwen2_5_VLTextConfig,
+        Qwen2_5_VLVisionConfig,
+    )
+    from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
+        Qwen2_5_VLForConditionalGeneration,
+    )
+
+    text_config = Qwen2_5_VLTextConfig(
+        vocab_size=64,
+        hidden_size=512,
+        intermediate_size=1024,
+        num_hidden_layers=4,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=64,
+        bos_token_id=1,
+        eos_token_id=2,
+        pad_token_id=0,
+    )
+    vision_config = Qwen2_5_VLVisionConfig(
+        depth=2,
+        hidden_size=64,
+        intermediate_size=128,
+        num_heads=4,
+        patch_size=2,
+        temporal_patch_size=2,
+        spatial_merge_size=2,
+        window_size=4,
+        out_hidden_size=512,
+        fullatt_block_indexes=[1],
+    )
+    model = Qwen2_5_VLForConditionalGeneration(
+        Qwen2_5_VLConfig(text_config=text_config, vision_config=vision_config)
+    ).eval()
+    vlm = VLM(
+        model_id="Org/TinyQwen2.5-VL",
+        model_path="/model-cache/tiny-qwen2.5-vl",
+        model=model,
+        processor=FakeProcessor(),
+        adapter=TransformersAdapter(model),
+    )
+
+    original_generate = model.generate
+    recorded = {}
+
+    def record_generate(**kwargs):
+        recorded["output_hidden_states"] = kwargs["output_hidden_states"]
+        output = original_generate(**kwargs)
+        recorded["output"] = output
+        return output
+
+    model.generate = record_generate
+    trace = vlm.generate_trace(
+        {"input_ids": torch.tensor([[1, 5, 6]])},
+        capture_hidden_states=True,
+        hidden_state_layers=[1, 3],
+        max_new_tokens=2,
+        do_sample=False,
+    )
+
+    assert recorded["output_hidden_states"] == (1, 3)
+    raw_steps = recorded["output"].hidden_states
+    assert len(raw_steps) == len(trace.steps)
+    for raw_step, trace_step in zip(raw_steps, trace.steps, strict=True):
+        assert len(raw_step) == len(vlm.adapter.layers) == 4
+        assert raw_step[0] is None
+        assert raw_step[2] is None
+        assert isinstance(raw_step[1], torch.Tensor)
+        assert isinstance(raw_step[3], torch.Tensor)
+        assert torch.equal(trace_step.hidden_states[1], raw_step[1])
+        assert torch.equal(trace_step.hidden_states[3], raw_step[3])
+        assert set(trace_step.hidden_states) == {1, 3}
 
 
 def test_generate_trace_disables_internal_capture_by_default() -> None:

@@ -427,8 +427,9 @@ class VLM:
 
         Transformers still owns the generation loop and all decoding semantics.
         Raw logits and decoder hidden states are disabled by default because they
-        can retain substantial GPU memory. hidden_state_layers uses zero-based
-        decoder layer indices and must be selected explicitly when capturing states.
+        can retain substantial GPU memory. When hidden states are requested,
+        zero-based decoder layer indices are passed to Transformers' native
+        selective output-capture mechanism; only those layer outputs are retained.
 
         A trace step records the forward pass that predicts its token_ids:
         step zero is prompt prefill, and later steps are autoregressive decode.
@@ -495,7 +496,7 @@ class VLM:
             inputs,
             return_dict_in_generate=True,
             output_logits=capture_logits,
-            output_hidden_states=capture_hidden_states,
+            output_hidden_states=selected_layers if capture_hidden_states else False,
             **generation_kwargs,
         )
         sequences = getattr(output, "sequences", None)
@@ -551,7 +552,9 @@ class VLM:
                     state = layer_outputs[layer + offset]
                     if not isinstance(state, Tensor):
                         raise GenerationTraceError(
-                            f"hidden state for decoder layer {layer} is not a tensor"
+                            f"hidden state for decoder layer {layer} is not a tensor; "
+                            "the model may not support Transformers' selective "
+                            "output_hidden_states layer selection"
                         )
                     hidden_state_map[layer] = state
 

@@ -80,7 +80,7 @@ trace = vlm.generate_trace(
 )
 ```
 
-`GenerationTrace` contains returned sequences, one `GenerationStep` per generated token, finish-reason estimates, and optional decoded text. Hidden-state capture requires an explicit layer selection. Logits and hidden states are opt-in because they can retain substantial GPU memory. Internal trace capture currently supports decoder-only generation and `num_beams=1`.
+`GenerationTrace` contains returned sequences, one `GenerationStep` per generated token, finish-reason estimates, and optional decoded text. Hidden-state capture requires an explicit layer selection. VLMBox passes those zero-based indices to Transformers' native `output_hidden_states` mechanism. Model implementations with native layer-list selection return tensors only for requested layers (unselected entries are `None`). A model that treats this option as a boolean may still return every layer; VLMBox continues to filter the requested layers, but that model will not receive the memory benefit of native selective capture. Logits and hidden states are opt-in because they can retain substantial GPU memory. Internal trace capture currently supports decoder-only generation and `num_beams=1`.
 
 A step records the forward pass that predicts its token: step zero is prompt prefill, later steps are decode. Its hidden states describe the input to that forward pass, not the token selected from its logits.
 
