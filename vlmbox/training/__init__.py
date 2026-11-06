@@ -2,6 +2,7 @@
 
 from vlmbox.training.image import (
     UniversalImageParameter,
+    UniversalLocalPerturbation,
     UniversalPatch,
     UniversalPerturbation,
 )
@@ -12,6 +13,7 @@ __all__ = [
     "ImageTrainer",
     "TrainingStep",
     "UniversalImageParameter",
+    "UniversalLocalPerturbation",
     "UniversalPatch",
     "UniversalPerturbation",
 ]

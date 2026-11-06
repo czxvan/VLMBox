@@ -7,8 +7,16 @@ from vlmbox.generation import (
     GenerationTrace,
     GenerationTraceError,
 )
-from vlmbox.image import crop_image, place_patch, resize_image, to_rgb
+from vlmbox.image import anchored_bbox, crop_image, place_patch, resize_image, to_rgb
 from vlmbox.model import VLM
+from vlmbox.render import (
+    InstructionBand,
+    InstructionStyle,
+    RenderedVisualInput,
+    compose_instruction_image,
+    compose_instruction_tensor,
+    render_instruction_band,
+)
 from vlmbox.representation import (
     angle,
     cosine_similarity,
@@ -24,6 +32,7 @@ from vlmbox.training import (
     ImageTrainer,
     TrainingStep,
     UniversalImageParameter,
+    UniversalLocalPerturbation,
     UniversalPatch,
     UniversalPerturbation,
 )
@@ -35,6 +44,7 @@ __all__ = [
     "ImageTrainer",
     "TrainingStep",
     "UniversalImageParameter",
+    "UniversalLocalPerturbation",
     "UniversalPatch",
     "UniversalPerturbation",
     "FinishReason",
@@ -42,10 +52,17 @@ __all__ = [
     "GenerationStep",
     "GenerationTrace",
     "GenerationTraceError",
+    "anchored_bbox",
     "crop_image",
     "place_patch",
     "resize_image",
     "to_rgb",
+    "InstructionBand",
+    "InstructionStyle",
+    "RenderedVisualInput",
+    "render_instruction_band",
+    "compose_instruction_image",
+    "compose_instruction_tensor",
     "angle",
     "cosine_similarity",
     "mean_difference",

@@ -152,3 +152,18 @@ def test_image_trainer_rejects_mixed_canvas_sizes() -> None:
     ]
     with pytest.raises(ValueError, match="same canvas size"):
         trainer.fit(samples, max_steps=1)
+
+
+def test_image_trainer_accepts_variable_size_hosts_for_local_parameter() -> None:
+    vlm = _FakeVLM()
+    patch = UniversalPatch(None, (2, 2), position="bottom_right")
+    trainer = ImageTrainer(vlm, patch, _objective, learning_rate=0.05)
+    samples = [
+        ImageSample(torch.full((3, 8, 9), 0.4), "A"),
+        ImageSample(torch.full((3, 7, 8), 0.6), "B"),
+    ]
+    before = patch.parameter.detach().clone()
+    history = trainer.fit(samples, max_steps=2, batch_size=1, shuffle=False)
+    assert len(history) == 2
+    assert not torch.equal(before, patch.parameter.detach())
+    assert all(step.gradient_norm > 0 for step in history)

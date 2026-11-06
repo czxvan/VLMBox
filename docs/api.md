@@ -104,13 +104,29 @@ Inputs follow PyTorch broadcasting rules where applicable. Tensor pairs must be 
 - `crop_image(image, box)`: crop a PIL image using `(left, top, right, bottom)`.
 - `place_patch(image, patch, position, mask=None)`: place a PIL patch at an `(x, y)` position, optionally using a mask.
 
+## Visual input rendering (VIRP)
+
+- `InstructionStyle(font_path, font_size=20, margin=20, line_spacing=None, ...)`: fixed font settings with an **external** font; the default spacing equals `int(font_size * 0.2)`.
+- `render_instruction_band(text, width, style, draw_text=True)`: RGB band with dynamic height and fully wrapped text. `draw_text=False` produces a geometrically matched blank control.
+- `compose_instruction_image(host, text, style, position="top", draw_text=True)`: PIL composed image with `instruction_bbox`, `host_bbox`, line list, font hash, and `metadata()`.
+- `compose_instruction_tensor(host, band, position="top")`: differentiable CHW image concatenation after applying a local tensor intervention.
+- `anchored_bbox((host_width, host_height), (patch_width, patch_height), anchor)`: half-open host-local bbox without margins; supports five named anchors and explicit `(x, y)`.
+
+See the [Visual Input Rendering Protocol](protocols/visual-input-rendering.md).
+The package does not bundle proprietary fonts or perform any host-image resizing in these APIs.
+
 ## Universal image optimization
 
-`UniversalPerturbation(canvas_size, epsilon, *, init="zeros", seed=2026, device=None, dtype=torch.float32)` creates one shared RGB perturbation constrained to `[-epsilon, epsilon]`.
+`UniversalPerturbation(canvas_size, epsilon, *, init="zeros", seed=2026, device=None, dtype=torch.float32)` preserves the original fixed-canvas full-image additive behavior.
 
-`UniversalPatch(canvas_size, size, *, position="top_left", init="random", seed=2026, device=None, dtype=torch.float32)` creates one shared RGB patch. Canvas and patch sizes use `(height, width)`; explicit positions use `(x, y)`. Named positions are `top_left`, `top_right`, `bottom_left`, `bottom_right`, and `center`.
+`UniversalPatch(canvas_size, size, *, position="top_left", init="random", seed=2026, device=None, dtype=torch.float32)` creates a shared overlay patch. `canvas_size=None` permits the same fixed-size patch to be applied to host images with different native dimensions.
 
-Both expose a trainable `.parameter`, `apply(images)`, and `project_()`. Input batches have shape `[batch, 3, height, width]` and must match the configured canvas.
+`UniversalLocalPerturbation(size, epsilon, *, position="bottom_right", init="zeros", seed=2026, device=None, dtype=torch.float32)` creates one shared, bounded local additive perturbation, likewise usable with native-size images.
+
+Sizes in trainable tensor APIs use `(height, width)`. Explicit positions use `(x, y)`. Named positions are `top_left`, `top_right`, `bottom_left`, `bottom_right`, and `center`.
+
+All three expose a trainable `.parameter`, `apply(images)`, and `project_()`. Image parameters accept either a CHW tensor or BCHW batch. Fixed-canvas parameters enforce one canvas size. Native-size parameters accept varying image sizes and `ImageTrainer` applies them per sample, letting the model's native processor perform batching.
+
 
 `ImageSample(image, prompt, system_prompt=None, target=None)` describes one RGB float Tensor image in `[0, 1]` and its conversation. `ImageTrainer(vlm, image_parameter, objective, *, learning_rate=1e-2, optimizer_cls=torch.optim.Adam, optimizer_kwargs=None)` optimizes the shared parameter. The objective receives `(model_outputs, model_inputs, samples)` and must return a scalar differentiable Tensor.
 

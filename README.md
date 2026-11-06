@@ -60,6 +60,8 @@ print(vlm.processor.batch_decode(new_tokens, skip_special_tokens=True)[0])
 - [Architecture and design](docs/architecture.md)
 - [Public API reference](docs/api.md)
 - [Image preprocessing and gradients](docs/preprocessing.md)
+- [Visual Input Rendering Protocol (VIRP)](docs/protocols/visual-input-rendering.md)
+
 
 Runnable examples are in [`examples/`](examples/).
 

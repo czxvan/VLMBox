@@ -69,8 +69,7 @@ def crop_image(
     width, height = image.size
     if not (0 <= left < right <= width and 0 <= top < bottom <= height):
         raise ValueError(
-            f"box {box!r} must be non-empty and inside image bounds "
-            f"(0, 0, {width}, {height})"
+            f"box {box!r} must be non-empty and inside image bounds (0, 0, {width}, {height})"
         )
     return to_rgb(image).crop((left, top, right, bottom))
 
@@ -114,13 +113,44 @@ def place_patch(
         if mask.mode not in ("1", "L"):
             raise ValueError("mask must have mode '1' or 'L'")
         if mask.size != patch.size:
-            raise ValueError(
-                f"mask size {mask.size} must match patch size {patch.size}"
-            )
+            raise ValueError(f"mask size {mask.size} must match patch size {patch.size}")
         mask = mask.convert("L")
 
     base.paste(patch_rgb, (left, top), mask)
     return base
 
 
-__all__ = ["crop_image", "place_patch", "resize_image", "to_rgb"]
+def anchored_bbox(
+    image_size: tuple[int, int],
+    region_size: tuple[int, int],
+    anchor: str | tuple[int, int] = "bottom_right",
+) -> tuple[int, int, int, int]:
+    """Resolve a half-open host-local bbox using PIL (width, height) dimensions.
+
+    Corner/center anchors use no margins. Explicit positions use (x, y).
+    """
+    width, height = _integer_tuple("image_size", image_size, 2)
+    region_width, region_height = _integer_tuple("region_size", region_size, 2)
+    if min(width, height, region_width, region_height) <= 0:
+        raise ValueError("image and region dimensions must be positive")
+    if region_width > width or region_height > height:
+        raise ValueError("region must fit inside host image")
+    if isinstance(anchor, str):
+        positions = {
+            "top_left": (0, 0),
+            "top_right": (width - region_width, 0),
+            "bottom_left": (0, height - region_height),
+            "bottom_right": (width - region_width, height - region_height),
+            "center": ((width - region_width) // 2, (height - region_height) // 2),
+        }
+        if anchor not in positions:
+            raise ValueError(f"unknown anchor {anchor!r}")
+        x, y = positions[anchor]
+    else:
+        x, y = _integer_tuple("anchor", anchor, 2)
+    if x < 0 or y < 0 or x + region_width > width or y + region_height > height:
+        raise ValueError("anchored region is outside host image; must fit inside")
+    return x, y, x + region_width, y + region_height
+
+
+__all__ = ["anchored_bbox", "crop_image", "place_patch", "resize_image", "to_rgb"]

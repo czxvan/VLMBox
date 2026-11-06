@@ -63,13 +63,11 @@ Objective = Callable[[Any, Mapping[str, Any], Sequence[ImageSample]], Tensor]
 
 
 class ImageTrainer:
-    """Optimize one shared perturbation or patch over a fixed-resolution dataset.
+    """Optimize shared image parameters across one or several host resolutions.
 
-    The objective receives ``(model_outputs, model_inputs, samples)`` and must
-    return one differentiable scalar Tensor. The VLM is put in eval mode and its
-    parameters are frozen during ``fit``; only the universal image parameter is
-    updated. Native model preprocessing runs on CPU and remains in the autograd
-    graph before processed tensors are transferred to the model device.
+    Native-size images are supported for parameters with canvas_size=None;
+    fixed-canvas parameters retain strict shape validation. The model's native
+    processor handles mixed image dimensions without implicit VLMBox resizing.
     """
 
     def __init__(
@@ -154,15 +152,15 @@ class ImageTrainer:
             raise ValueError("seed must be between 0 and 2**63 - 1")
 
         canvas_sizes = {tuple(sample.image.shape[-2:]) for sample in samples}
-        if len(canvas_sizes) != 1:
-            raise ValueError("all training images must have the same canvas size")
-        canvas_size = next(iter(canvas_sizes))
-        if canvas_size != self.image_parameter.canvas_size:
-            raise ValueError(
-                f"dataset canvas {canvas_size} does not match image parameter canvas "
-                f"{self.image_parameter.canvas_size}"
-            )
-
+        if self.image_parameter.canvas_size is not None:
+            if len(canvas_sizes) != 1:
+                raise ValueError("all training images must have the same canvas size")
+            canvas_size = next(iter(canvas_sizes))
+            if canvas_size != self.image_parameter.canvas_size:
+                raise ValueError(
+                    f"dataset canvas {canvas_size} does not match image parameter canvas "
+                    f"{self.image_parameter.canvas_size}"
+                )
         target_modes = {sample.target is not None for sample in samples}
         if len(target_modes) != 1:
             raise ValueError("all samples must either provide target text or omit it")
@@ -195,16 +193,25 @@ class ImageTrainer:
                 cursor += len(batch_indices)
                 batch = [samples[index] for index in batch_indices]
 
-                images = torch.stack(
-                    [
-                        sample.image.detach().to(device=device, dtype=torch.float32)
+                if self.image_parameter.canvas_size is None:
+                    attacked_images = [
+                        self.image_parameter.apply(
+                            sample.image.detach().to(device=device, dtype=torch.float32)
+                        )
                         for sample in batch
                     ]
-                )
-                attacked = self.image_parameter.apply(images)
+                else:
+                    images = torch.stack(
+                        [
+                            sample.image.detach().to(device=device, dtype=torch.float32)
+                            for sample in batch
+                        ]
+                    )
+                    attacked = self.image_parameter.apply(images)
+                    attacked_images = [attacked[index] for index in range(len(batch))]
                 conversations = [
-                    self._conversation(sample, attacked[index])
-                    for index, sample in enumerate(batch)
+                    self._conversation(sample, attacked_image)
+                    for sample, attacked_image in zip(batch, attacked_images, strict=True)
                 ]
                 inputs = self.vlm.prepare_differentiable(
                     conversations,
