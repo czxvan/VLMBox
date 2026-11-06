@@ -24,7 +24,7 @@ The current loader uses `dtype="auto"`, `device_map="auto"`, and `trust_remote_c
 | `vlmbox.representation` | Tensor operations for direction extraction, projection, and similarity |
 | `vlmbox.image` | PIL image conversion, resizing, cropping, and patch placement |
 | `vlmbox.render` | Fixed-size-font dynamic-height instruction bands, native-host image composition, layout metadata, and differentiable tensor concatenation |
-
+| `vlmbox.image_render` | YAML validation and orchestration of instruction rendering, host preservation, intervention, and composition |
 | `vlmbox.training.image` | Universal perturbation and patch parameterizations |
 | `vlmbox.training.trainer` | Optimization loop for universal image parameters |
 | `vlmbox.generation` | Architecture-independent generation trace data structures |

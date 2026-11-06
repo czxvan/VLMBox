@@ -1,0 +1,45 @@
+# ImageRenderPipeline configuration, schema version 1.
+# Font paths are resolved relative to this YAML file.
+# Supply a licensed local Arial font at this path, or change it to your font file.
+schema_version: 1
+
+image_render:
+  instruction:
+    position: top
+    font:
+      path: ./fonts/Arial.ttf
+      size: 20
+    foreground: "#000000"
+    background: "#FFFFFF"
+    alignment: center
+    margin: 20
+    line_spacing: 4
+
+  host:
+    preserve_original_size: true
+    color_space: RGB
+
+  intervention:
+    # Supported: none, overlay_patch, local_additive
+    type: overlay_patch
+    # Absolute pixels in [height, width] order.
+    size: [128, 128]
+    anchor: bottom_right
+    # Optional: zeros or random; default is random for patches.
+    init: random
+    seed: 42
+
+# For local additive perturbation, use:
+#
+# intervention:
+#   type: local_additive
+#   size: [128, 128]
+#   anchor: bottom_right
+#   epsilon: 0.031372549  # 8/255 in RGB [0, 1]
+#   init: zeros
+#   seed: 42
+#
+# To render without an intervention:
+#
+# intervention:
+#   type: none

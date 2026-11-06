@@ -8,6 +8,7 @@ from vlmbox.generation import (
     GenerationTraceError,
 )
 from vlmbox.image import anchored_bbox, crop_image, place_patch, resize_image, to_rgb
+from vlmbox.image_render import ImageRenderPipeline
 from vlmbox.model import VLM
 from vlmbox.render import (
     InstructionBand,
@@ -57,6 +58,7 @@ __all__ = [
     "place_patch",
     "resize_image",
     "to_rgb",
+    "ImageRenderPipeline",
     "InstructionBand",
     "InstructionStyle",
     "RenderedVisualInput",

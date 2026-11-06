@@ -4,6 +4,17 @@ VIRP is VLMBox's reusable convention for composing an unmodified host image
 with visible instruction text and applying a **separate** visual intervention.
 The geometry is independent of any model, dataset, or attack algorithm.
 
+## User-facing configuration
+
+The project-facing entry point is ImageRenderPipeline.from_yaml(...). A project
+maintains one YAML file for typography, host-image preservation, and intervention
+settings; VLMBox validates it and executes the complete rendering path. Projects
+should not manually assemble the low-level rendering functions.
+
+See the complete [ImageRenderPipeline YAML example](../../examples/image_render.yaml).
+The Arial 20 px / top-band / bottom-right patch values in that example are a
+reference profile, not mandatory VLMBox defaults.
+
 ## Core contract
 
 1. A host image retains its decoded pixel dimensions and RGB values. The
@@ -30,47 +41,14 @@ The geometry is independent of any model, dataset, or attack algorithm.
 8. The local tensor intervention and concatenation remain differentiable;
    VLMBox does not enforce a model processor, evaluation metric, or optimization loss.
 
-The supplied Pillow renderer follows ARGUS's 20 px fixed-size, 20 px margin,
-black-on-white, horizontally centered typography and `int(font_size*0.2)`
-inter-line spacing when explicitly configured. Unlike the upstream
-`text.split()` implementation, VLMBox preserves explicit newlines and wraps
-overlong tokens safely rather than allowing them to overflow.
+The example YAML uses ARGUS-compatible 20 px typography, 20 px margins,
+black-on-white centered text, and 4 px line spacing. These values are selected
+by that example profile; VLMBox's generic low-level style does not impose them.
+## Low-level Python primitives
 
-## Reference profile (example, not a VLMBox-wide default)
-
-- Font: external `Arial.ttf` at 20 px
-- Text: black on white, 20 px horizontal/vertical margin, above the host
-- Host image: preserve its original decoded dimensions
-- Intervention: fixed absolute-pixel square, at `bottom_right`, no offset
-- Operators: `UniversalPatch` (overlay) and `UniversalLocalPerturbation`
-  (local additive with projectable `epsilon`)
-
-```python
-import torch
-from PIL import Image
-from vlmbox import (
-    InstructionStyle,
-    compose_instruction_image,
-    render_instruction_band,
-    compose_instruction_tensor,
-    UniversalPatch,
-    UniversalLocalPerturbation,
-)
-
-style = InstructionStyle(font_path="/path/to/Arial.ttf", font_size=20)
-with Image.open("host.jpg") as source:
-    rendered = compose_instruction_image(source, "Answer the question.", style)
-print(rendered.metadata())
-
-# When training, operate on native-size CHW float host Tensor, then append the
-# fixed instruction band as an ordinary CHW float Tensor (gradient is preserved).
-patch = UniversalPatch(None, (128, 128), position="bottom_right")
-perturbation = UniversalLocalPerturbation((128, 128), epsilon=16 / 255, position="bottom_right")
-host = torch.rand(3, 400, 640)
-attacked_host = patch.apply(host)  # or perturbation.apply(host)
-# band = ...  # CHW RGB tensor produced from render_instruction_band(...)
-# final = compose_instruction_tensor(attacked_host, band)
-```
+The lower-level renderer, geometry, composition, and intervention APIs remain
+available for specialized workflows. Most research projects should use
+ImageRenderPipeline and its YAML configuration instead.
 
 All image sizes in the rendering/geometry helpers use Pillow's
 `(width, height)` convention. Sizes in trainable PyTorch parameterizations

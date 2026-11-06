@@ -18,7 +18,9 @@ from vlmbox.training import UniversalLocalPerturbation, UniversalPatch
 def style() -> InstructionStyle:
     # Use the system's redistributable test font, never bundle Arial.
     font = ImageFont.truetype("DejaVuSans.ttf", 20)
-    return InstructionStyle(font_path=font.path, font_size=20)
+    return InstructionStyle(
+        font_path=font.path, font_size=20, margin=20, line_spacing=4, alignment="center"
+    )
 
 
 def test_dynamic_band_preserves_host_dimensions_and_all_words(style: InstructionStyle) -> None:
@@ -61,7 +63,9 @@ def test_explicit_newlines_and_bottom_position(style: InstructionStyle) -> None:
 
 def test_renderer_rejects_missing_fonts_and_narrow_width(style: InstructionStyle) -> None:
     with pytest.raises(FileNotFoundError):
-        render_instruction_band("hi", 100, InstructionStyle(font_path="/missing/font.ttf"))
+        render_instruction_band(
+            "hi", 100, InstructionStyle(font_path="/missing/font.ttf", font_size=20)
+        )
     with pytest.raises(ValueError, match="width"):
         render_instruction_band("hi", 40, style)
     with pytest.raises(ValueError, match="nonempty"):

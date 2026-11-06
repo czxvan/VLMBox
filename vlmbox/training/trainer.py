@@ -17,12 +17,13 @@ from vlmbox.training.image import UniversalImageParameter
 
 @dataclass(frozen=True)
 class ImageSample:
-    """One fixed RGB image and its text conversation for universal optimization."""
+    """One native-size RGB image and its conversation/in-image instruction."""
 
     image: Tensor
     prompt: str
     system_prompt: str | None = None
     target: str | None = None
+    image_instruction: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.image, Tensor):
@@ -48,6 +49,10 @@ class ImageSample:
             not isinstance(self.target, str) or not self.target.strip()
         ):
             raise ValueError("target must be a non-empty string when provided")
+        if self.image_instruction is not None and (
+            not isinstance(self.image_instruction, str) or not self.image_instruction.strip()
+        ):
+            raise ValueError("image_instruction must be a non-empty string when provided")
 
 
 @dataclass(frozen=True)
@@ -73,7 +78,7 @@ class ImageTrainer:
     def __init__(
         self,
         vlm: VLM,
-        image_parameter: UniversalImageParameter,
+        image_parameter: UniversalImageParameter | torch.nn.Module,
         objective: Objective,
         *,
         learning_rate: float = 1e-2,
@@ -87,8 +92,16 @@ class ImageTrainer:
         learning_rate = float(learning_rate)
         if not math.isfinite(learning_rate) or learning_rate <= 0.0:
             raise ValueError("learning_rate must be finite and positive")
-        if not isinstance(image_parameter, UniversalImageParameter):
-            raise TypeError("image_parameter must be UniversalPerturbation or UniversalPatch")
+        is_render_pipeline = (
+            isinstance(image_parameter, torch.nn.Module)
+            and callable(getattr(image_parameter, "render_tensor", None))
+            and callable(getattr(image_parameter, "project_", None))
+            and getattr(image_parameter, "canvas_size", object()) is None
+        )
+        if not isinstance(image_parameter, UniversalImageParameter) and not is_render_pipeline:
+            raise TypeError(
+                "image_parameter must be a UniversalImageParameter or ImageRenderPipeline"
+            )
         if not isinstance(optimizer_cls, type) or not issubclass(optimizer_cls, Optimizer):
             raise TypeError("optimizer_cls must be a torch.optim.Optimizer class")
 
@@ -99,6 +112,7 @@ class ImageTrainer:
         options.setdefault("lr", learning_rate)
         self.vlm = vlm
         self.image_parameter = image_parameter
+        self._uses_render_pipeline = is_render_pipeline
         self.objective = objective
         self.optimizer = optimizer_cls(parameters, **options)
 
@@ -162,6 +176,13 @@ class ImageTrainer:
                     f"{self.image_parameter.canvas_size}"
                 )
         target_modes = {sample.target is not None for sample in samples}
+        image_instruction_modes = {sample.image_instruction is not None for sample in samples}
+        if self._uses_render_pipeline and image_instruction_modes != {True}:
+            raise ValueError(
+                "every sample must provide image_instruction when using ImageRenderPipeline"
+            )
+        if not self._uses_render_pipeline and image_instruction_modes != {False}:
+            raise ValueError("image_instruction requires ImageRenderPipeline as image_parameter")
         if len(target_modes) != 1:
             raise ValueError("all samples must either provide target text or omit it")
         add_generation_prompt = not next(iter(target_modes))
@@ -193,7 +214,15 @@ class ImageTrainer:
                 cursor += len(batch_indices)
                 batch = [samples[index] for index in batch_indices]
 
-                if self.image_parameter.canvas_size is None:
+                if self._uses_render_pipeline:
+                    attacked_images = [
+                        self.image_parameter.render_tensor(
+                            sample.image.detach().to(device=device, dtype=torch.float32),
+                            sample.image_instruction,
+                        )
+                        for sample in batch
+                    ]
+                elif self.image_parameter.canvas_size is None:
                     attacked_images = [
                         self.image_parameter.apply(
                             sample.image.detach().to(device=device, dtype=torch.float32)

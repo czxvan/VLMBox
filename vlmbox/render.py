@@ -18,14 +18,15 @@ BandPosition = Literal["top", "bottom"]
 
 @dataclass(frozen=True)
 class InstructionStyle:
-    """Text rendering settings. The font file is supplied by the caller, never bundled."""
+    """Generic text rendering settings; project-specific values belong in YAML."""
 
     font_path: str | Path
-    font_size: int = 20
-    margin: int = 20
-    line_spacing: int | None = None
+    font_size: int
+    margin: int = 0
+    line_spacing: int = 0
     foreground: tuple[int, int, int] = (0, 0, 0)
     background: tuple[int, int, int] = (255, 255, 255)
+    alignment: Literal["left", "center", "right"] = "left"
 
     def __post_init__(self) -> None:
         if (
@@ -36,12 +37,14 @@ class InstructionStyle:
             raise ValueError("font_size must be a positive integer")
         if not isinstance(self.margin, int) or isinstance(self.margin, bool) or self.margin < 0:
             raise ValueError("margin must be a non-negative integer")
-        if self.line_spacing is not None and (
+        if (
             not isinstance(self.line_spacing, int)
             or isinstance(self.line_spacing, bool)
             or self.line_spacing < 0
         ):
-            raise ValueError("line_spacing must be a non-negative integer or None")
+            raise ValueError("line_spacing must be a non-negative integer")
+        if self.alignment not in {"left", "center", "right"}:
+            raise ValueError("alignment must be left, center, or right")
         for name in ("foreground", "background"):
             color = getattr(self, name)
             if (
@@ -56,7 +59,7 @@ class InstructionStyle:
 
     @property
     def spacing(self) -> int:
-        return int(self.font_size * 0.2) if self.line_spacing is None else self.line_spacing
+        return self.line_spacing
 
 
 @dataclass(frozen=True)
@@ -78,18 +81,36 @@ class RenderedVisualInput:
     font_size: int
     font_sha256: str
     position: BandPosition
+    intervention_bbox: Box | None = None
+    intervention_type: str | None = None
+    config_sha256: str | None = None
+    instruction_sha256: str | None = None
 
     def metadata(self) -> dict[str, object]:
-        return {
+        metadata: dict[str, object] = {
             "renderer": "virp-1",
             "canvas_size": list(self.image.size),
             "instruction_bbox": list(self.instruction_bbox),
             "host_bbox": list(self.host_bbox),
+            "host_size": [
+                self.host_bbox[2] - self.host_bbox[0],
+                self.host_bbox[3] - self.host_bbox[1],
+            ],
             "line_count": len(self.lines),
             "font_size": self.font_size,
             "font_sha256": self.font_sha256,
             "instruction_position": self.position,
         }
+        if self.intervention_type is not None:
+            metadata["intervention_type"] = self.intervention_type
+            metadata["intervention_bbox"] = (
+                list(self.intervention_bbox) if self.intervention_bbox is not None else None
+            )
+        if self.config_sha256 is not None:
+            metadata["config_sha256"] = self.config_sha256
+        if self.instruction_sha256 is not None:
+            metadata["instruction_sha256"] = self.instruction_sha256
+        return metadata
 
 
 def _wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int) -> tuple[str, ...]:
@@ -160,7 +181,13 @@ def render_instruction_band(
         draw = ImageDraw.Draw(band)
         y = style.margin
         for line in lines:
-            x = int((width - font.getlength(line)) // 2)
+            text_width = font.getlength(line)
+            if style.alignment == "left":
+                x = style.margin
+            elif style.alignment == "right":
+                x = int(width - style.margin - text_width)
+            else:
+                x = int((width - text_width) // 2)
             draw.text((x, y), line, fill=style.foreground, font=font)
             y += style.font_size + style.spacing
     return InstructionBand(
