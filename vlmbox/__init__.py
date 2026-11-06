@@ -6,4 +6,4 @@ from vlmbox.utils import set_seed
 
 __all__ = ["VLM", "Renderer", "set_seed"]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

@@ -10,7 +10,13 @@ A small library for VLM research: prepare model inputs, inspect and edit decoder
 
 ## Install
 
-From this checkout, with Python 3.11+ and a compatible PyTorch/CUDA environment:
+In your own uv project (Python 3.11+):
+
+```bash
+uv add vlmbox
+```
+
+For local development from this checkout:
 
 ```bash
 uv venv --python 3.11

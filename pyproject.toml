@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vlmbox"
-version = "0.1.0"
+version = "0.2.0"
 description = "A lightweight research toolbox for vision-language models."
 readme = "README.md"
 requires-python = ">=3.11"
