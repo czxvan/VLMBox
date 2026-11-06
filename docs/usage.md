@@ -175,7 +175,7 @@ Tensor images must be finite floating-point RGB CHW values in `[0, 1]`, with at 
 With images under `data/images/` and the configured font available, optimize a complete teacher-forced assistant target:
 
 ```bash
-python examples/universal_image_optimization.py \
+uv run python examples/universal_image_optimization.py \
   --model-id HuggingFaceTB/SmolVLM-500M-Instruct \
   --image-dir data/images --render-config configs/image_render.yaml \
   --target RED --steps 100 --batch-size 2 --output outputs/preview.png
@@ -186,7 +186,7 @@ This writes `preview.png`, `preview.pt`, and `preview.json`. The script derives 
 For a paired-prompt direction and activation-steering probe, using a synthetic image by default:
 
 ```bash
-python examples/paired_prompt_steering.py \
+uv run python examples/paired_prompt_steering.py \
   --model-id HuggingFaceTB/SmolVLM-500M-Instruct \
   --max-new-tokens 4 --output outputs/steering.json
 ```

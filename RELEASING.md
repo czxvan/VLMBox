@@ -30,8 +30,8 @@ The workflow uses OIDC Trusted Publishing. Do not create or store long-lived PyP
 5. Verify the release:
 
    ```bash
-   python -m pip install --upgrade vlmbox
-   python -c "import vlmbox; print(vlmbox.__version__)"
+   uv pip install --upgrade vlmbox
+   uv pip show vlmbox
    ```
 
 ## Important

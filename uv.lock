@@ -1804,6 +1804,7 @@ dependencies = [
     { name = "pillow" },
     { name = "pyyaml" },
     { name = "torch" },
+    { name = "torchvision" },
     { name = "transformers" },
 ]
 
@@ -1811,9 +1812,6 @@ dependencies = [
 dev = [
     { name = "pytest" },
     { name = "ruff" },
-]
-examples = [
-    { name = "torchvision" },
 ]
 
 [package.metadata]
@@ -1826,7 +1824,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.14" },
     { name = "torch", specifier = ">=2.14.1,<2.15", index = "https://download.pytorch.org/whl/cu130" },
-    { name = "torchvision", marker = "extra == 'examples'", specifier = ">=0.29.1,<0.30", index = "https://download.pytorch.org/whl/cu130" },
+    { name = "torchvision", specifier = ">=0.29.1,<0.30", index = "https://download.pytorch.org/whl/cu130" },
     { name = "transformers", specifier = ">=5.22.1,<6" },
 ]
-provides-extras = ["dev", "examples"]
+provides-extras = ["dev"]

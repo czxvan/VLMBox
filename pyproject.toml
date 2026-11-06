@@ -28,6 +28,7 @@ classifiers = [
 ]
 dependencies = [
     "torch>=2.14.1,<2.15",
+    "torchvision>=0.29.1,<0.30",
     "transformers>=5.22.1,<6",
     "modelscope>=1.40.2",
     "numpy>=1.24",
@@ -40,9 +41,6 @@ dependencies = [
 dev = [
     "pytest>=8.3",
     "ruff>=0.14",
-]
-examples = [
-    "torchvision>=0.29.1,<0.30",
 ]
 
 [project.urls]

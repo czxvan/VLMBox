@@ -13,10 +13,11 @@ A small library for VLM research: prepare model inputs, inspect and edit decoder
 From this checkout, with Python 3.11+ and a compatible PyTorch/CUDA environment:
 
 ```bash
-pip install -e '.[examples]'
+uv venv --python 3.11
+uv pip install -e .
 ```
 
-The examples extra includes torchvision for native image processors. Checkpoints are downloaded from ModelScope.
+Local installation is editable. Native image-processing dependencies are included; checkpoints are downloaded from ModelScope.
 
 ## Quick start
 
@@ -55,7 +56,7 @@ Layer indices are **zero-based decoder blocks**. Captures and traces return dire
 ## Development
 
 ```bash
-uv sync --frozen --extra dev --extra examples
+uv sync --frozen --extra dev
 uv run pytest
 uv run ruff check .
 uv run ruff format --check .
