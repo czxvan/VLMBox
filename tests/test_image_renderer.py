@@ -8,7 +8,7 @@ import torch
 from PIL import Image, ImageFont
 from torch import nn
 
-from vlmbox import ImageRenderPipeline
+from vlmbox import ImageRenderer
 from vlmbox.training import ImageSample, ImageTrainer
 
 
@@ -51,41 +51,42 @@ image_render:
     return path
 
 
-def test_yaml_pipeline_renders_pil_and_records_metadata(tmp_path: Path, font_path: Path) -> None:
-    config_path = _write_config(tmp_path / "render.yaml", font_path)
-    pipeline = ImageRenderPipeline.from_yaml(config_path)
+def test_yaml_renderer_returns_pil_and_optional_metadata(tmp_path: Path, font_path: Path) -> None:
+    renderer = ImageRenderer.from_yaml(_write_config(tmp_path / "render.yaml", font_path))
     host = Image.new("RGB", (32, 24), (20, 40, 60))
-    result = pipeline.render(host, "Execute this instruction.")
 
-    assert result.image.width == host.width
-    assert result.image.height > host.height
-    assert result.image.crop(result.host_bbox).size == host.size
-    assert result.intervention_type == "overlay_patch"
-    host_offset = result.host_bbox[1]
-    assert result.intervention_bbox == (27, host_offset + 20, 32, host_offset + 24)
-    metadata = result.metadata()
-    assert metadata["config_sha256"] == pipeline.config_sha256
+    image = renderer.render(host, "Execute this instruction.")
+    assert isinstance(image, Image.Image)
+    assert image.width == host.width
+    assert image.height > host.height
+
+    image, metadata = renderer.render(host, "Execute this instruction.", return_metadata=True)
+    host_bbox = tuple(metadata["host_bbox"])
+    assert image.crop(host_bbox).size == host.size
+    assert metadata["intervention_type"] == "overlay_patch"
+    host_offset = host_bbox[1]
+    assert metadata["intervention_bbox"] == [27, host_offset + 20, 32, host_offset + 24]
+    assert metadata["config_sha256"]
     assert metadata["instruction_sha256"]
-    assert metadata["intervention_bbox"] == list(result.intervention_bbox)
 
 
-def test_yaml_pipeline_tensor_path_preserves_gradient_and_native_sizes(
+def test_renderer_private_tensor_path_preserves_gradient_and_native_sizes(
     tmp_path: Path, font_path: Path
 ) -> None:
-    pipeline = ImageRenderPipeline.from_yaml(
+    renderer = ImageRenderer.from_yaml(
         _write_config(tmp_path / "render.yaml", font_path, size="[2, 3]")
     )
     for height, width in [(8, 48), (12, 43)]:
-        host = torch.full((3, height, width), 0.2)
-        rendered = pipeline.render_tensor(host, "Do the task.")
+        host = Image.new("RGB", (width, height), (50, 50, 50))
+        rendered = renderer._render_tensor(host, "Do the task.")
         assert rendered.shape[0] == 3
         assert rendered.shape[1] > height
         assert rendered.shape[2] == width
         rendered.square().sum().backward()
-    assert len(pipeline._band_cache) == 2
-    assert pipeline.intervention is not None
-    assert pipeline.intervention.parameter.grad is not None
-    assert torch.count_nonzero(pipeline.intervention.parameter.grad) > 0
+    assert len(renderer._band_cache) == 2
+    parameter = renderer._trainable_parameters()[0]
+    assert parameter.grad is not None
+    assert torch.count_nonzero(parameter.grad) > 0
 
 
 def test_yaml_local_additive_config_uses_same_geometry(tmp_path: Path, font_path: Path) -> None:
@@ -96,25 +97,27 @@ def test_yaml_local_additive_config_uses_same_geometry(tmp_path: Path, font_path
         size="[2, 3]",
         extra="    epsilon: 0.1\n    init: zeros\n",
     )
-    pipeline = ImageRenderPipeline.from_yaml(config)
-    host = torch.full((3, 8, 40), 0.2)
+    renderer = ImageRenderer.from_yaml(config)
     with torch.no_grad():
-        pipeline.intervention.delta.fill_(0.05)
-    rendered = pipeline.render_tensor(host, "Do the task.")
+        renderer._intervention.delta.fill_(0.05)
+    host = Image.new("RGB", (40, 8), (int(0.2 * 255),) * 3)
+    rendered = renderer._render_tensor(host, "Do the task.")
     torch.testing.assert_close(
         rendered[:, -2:, -3:],
         torch.full((3, 2, 3), 0.25),
+        atol=1 / 255,
+        rtol=0,
     )
 
 
-def test_yaml_pipeline_can_disable_intervention(tmp_path: Path, font_path: Path) -> None:
+def test_yaml_renderer_can_disable_intervention(tmp_path: Path, font_path: Path) -> None:
     path = _write_config(tmp_path / "none.yaml", font_path, intervention="none")
     text = path.read_text(encoding="utf-8")
     text = text.replace("    size: [4, 5]\n    anchor: bottom_right\n", "")
     path.write_text(text, encoding="utf-8")
-    pipeline = ImageRenderPipeline.from_yaml(path)
-    assert pipeline.intervention is None
-    assert list(pipeline.parameters()) == []
+    renderer = ImageRenderer.from_yaml(path)
+    assert renderer._intervention is None
+    assert renderer._trainable_parameters() == ()
 
 
 @pytest.mark.parametrize(
@@ -136,24 +139,24 @@ def test_yaml_pipeline_can_disable_intervention(tmp_path: Path, font_path: Path)
         ),
     ],
 )
-def test_yaml_pipeline_rejects_invalid_config(
+def test_yaml_renderer_rejects_invalid_config(
     tmp_path: Path, font_path: Path, mutate, message: str
 ) -> None:
     path = _write_config(tmp_path / "invalid.yaml", font_path)
     path.write_text(mutate(path.read_text(encoding="utf-8")), encoding="utf-8")
     with pytest.raises((ValueError, TypeError), match=message):
-        ImageRenderPipeline.from_yaml(path)
+        ImageRenderer.from_yaml(path)
 
 
-def test_yaml_pipeline_resolves_relative_font_paths(tmp_path: Path, font_path: Path) -> None:
+def test_yaml_renderer_resolves_relative_font_paths(tmp_path: Path, font_path: Path) -> None:
     fonts = tmp_path / "fonts"
     fonts.mkdir()
     relative_font = fonts / "test.ttf"
     relative_font.write_bytes(font_path.read_bytes())
     path = tmp_path / "config.yaml"
     _write_config(path, Path("fonts/test.ttf"))
-    pipeline = ImageRenderPipeline.from_yaml(path)
-    assert pipeline.style.font_path == relative_font.resolve()
+    renderer = ImageRenderer.from_yaml(path)
+    assert renderer._style.font_path == relative_font.resolve()
 
 
 class _FakeModel(nn.Module):
@@ -187,27 +190,50 @@ def _objective(outputs, _inputs, _samples):
     return outputs.logits.square().mean()
 
 
-def test_image_trainer_accepts_yaml_pipeline_with_image_instructions(
+def test_image_trainer_optimizes_renderer_and_keeps_vlm_frozen(
     tmp_path: Path, font_path: Path
 ) -> None:
-    pipeline = ImageRenderPipeline.from_yaml(
+    renderer = ImageRenderer.from_yaml(
         _write_config(tmp_path / "train.yaml", font_path, size="[2, 2]")
     )
-    trainer = ImageTrainer(_FakeVLM(), pipeline, _objective)
+    vlm = _FakeVLM()
+    vlm.model.train()
+    parameter = renderer._trainable_parameters()[0]
+    before = parameter.detach().clone()
+    trainer = ImageTrainer(vlm, renderer, _objective, learning_rate=0.05)
     samples = [
         ImageSample(
-            torch.full((3, 8, 41), 0.3),
+            Image.new("RGB", (41, 8), (80, 80, 80)),
             "Answer the user prompt.",
             image_instruction="Follow the text shown in the image.",
         ),
         ImageSample(
-            torch.full((3, 10, 37), 0.6),
+            Image.new("RGB", (37, 10), (150, 150, 150)),
             "Answer the user prompt.",
             image_instruction="Perform the instruction visible above the image.",
         ),
     ]
     history = trainer.fit(samples, max_steps=2, batch_size=1, shuffle=False)
+
     assert len(history) == 2
     assert all(step.gradient_norm > 0 for step in history)
-    assert pipeline.intervention is not None
-    assert pipeline.intervention.parameter.grad is None
+    assert not torch.equal(before, parameter.detach())
+    assert parameter.grad is None
+    assert vlm.model.training is True
+    assert all(parameter.requires_grad for parameter in vlm.model.parameters())
+    assert all(parameter.grad is None for parameter in vlm.model.parameters())
+
+
+def test_image_trainer_rejects_renderer_without_trainable_intervention(
+    tmp_path: Path, font_path: Path
+) -> None:
+    path = _write_config(tmp_path / "none.yaml", font_path, intervention="none")
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "    size: [4, 5]\n    anchor: bottom_right\n", ""
+        ),
+        encoding="utf-8",
+    )
+    renderer = ImageRenderer.from_yaml(path)
+    with pytest.raises(ValueError, match="no trainable intervention"):
+        ImageTrainer(_FakeVLM(), renderer, _objective)

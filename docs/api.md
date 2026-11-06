@@ -106,46 +106,31 @@ Inputs follow PyTorch broadcasting rules where applicable. Tensor pairs must be 
 
 ## YAML-configured image rendering
 
-`ImageRenderPipeline.from_yaml("path/to/image_render.yaml")` loads and validates one complete rendering configuration. Relative font paths are resolved relative to the YAML file. The pipeline exposes:
+`ImageRenderer.from_yaml("path/to/image_render.yaml")` loads one complete rendering configuration. Relative font paths are resolved relative to the YAML file. This is the only public image-rendering class.
 
-- `render(host_pil, instruction)`: apply the configured intervention and return a PIL `RenderedVisualInput` with geometry and reproducibility metadata.
-- `render_tensor(host_chw, instruction)`: apply the same intervention and compose the text band as a differentiable RGB CHW Tensor.
-- `pipeline.intervention`: the trainable `UniversalPatch` or `UniversalLocalPerturbation` parameter module.
-- `pipeline.project_()`: project trainable intervention parameters after an optimizer update.
-- `pipeline.to(device)`: move trainable intervention parameters to a device.
+```python
+from PIL import Image
+from vlmbox import ImageRenderer
 
-The same pipeline can be passed directly to `ImageTrainer`. Set `ImageSample.image_instruction` to the text rendered into the image; `ImageSample.prompt` remains the ordinary user conversation text. Each sample is rendered independently, so native host dimensions and instruction-band heights may differ. `render_tensor` expects an RGB CHW float Tensor in `[0, 1]`.
+renderer = ImageRenderer.from_yaml("configs/image_render.yaml")
+host_image = Image.open("host.png")
+rendered_image = renderer.render(host_image, "Execute the instruction in the image.")
+```
 
-The pipeline is an `nn.Module`: its intervention is included in `parameters()` and `state_dict()`. `ImageTrainer` optimizes the pipeline parameters and calls `project_()` after each update. The objective receives `(model_outputs, model_inputs, samples)` and must return a scalar differentiable Tensor.
-
-See [examples/image_render.yaml](../examples/image_render.yaml) for the canonical configuration. The YAML schema is versioned and rejects unknown keys rather than silently ignoring typos.
-
-## Visual input rendering (VIRP)
-
-- `InstructionStyle(font_path, font_size, margin=0, line_spacing=0, foreground=(0, 0, 0), background=(255, 255, 255), alignment="left")`: generic low-level typography settings. Projects should set all rendering values explicitly in their YAML configuration.
-- `render_instruction_band(text, width, style, draw_text=True)`: RGB band with dynamic height and fully wrapped text. `draw_text=False` produces a geometrically matched blank control.
-- `compose_instruction_image(host, text, style, position="top", draw_text=True)`: PIL composed image with `instruction_bbox`, `host_bbox`, line list, font hash, and `metadata()`.
-- `compose_instruction_tensor(host, band, position="top")`: differentiable CHW image concatenation after applying a local tensor intervention.
-- `anchored_bbox((host_width, host_height), (patch_width, patch_height), anchor)`: half-open host-local bbox without margins; supports five named anchors and explicit `(x, y)`.
-
-See the [Visual Input Rendering Protocol](protocols/visual-input-rendering.md).
-The package does not bundle proprietary fonts or perform any host-image resizing in these APIs.
+- `host_image` must be a `PIL.Image.Image`; the host's decoded dimensions are preserved.
+- `render()` returns a `PIL.Image.Image`. Set `return_metadata=True` to also receive a plain metadata dictionary.
+- The YAML selects `none`, `overlay_patch`, or `local_additive` and defines the intervention's absolute pixel size and anchor.
+- Tensor conversion, differentiable rendering, intervention parameters, and parameter projection are internal implementation details. Users do not call `forward()`, `render_tensor()`, `parameters()`, or `project_()`.
 
 ## Universal image optimization
 
-`UniversalPerturbation(canvas_size, epsilon, *, init="zeros", seed=2026, device=None, dtype=torch.float32)` preserves the original fixed-canvas full-image additive behavior.
+`ImageSample(image, prompt, system_prompt=None, target=None, image_instruction=None)` describes a native-size PIL host image, the ordinary conversation prompt, and the optional system/assistant text. When training with `ImageRenderer`, every sample must provide `image_instruction`, the text rendered into the image.
 
-`UniversalPatch(canvas_size, size, *, position="top_left", init="random", seed=2026, device=None, dtype=torch.float32)` creates a shared overlay patch. `canvas_size=None` permits the same fixed-size patch to be applied to host images with different native dimensions.
+`ImageTrainer(vlm, renderer, objective, *, learning_rate=1e-2, optimizer_cls=torch.optim.Adam, optimizer_kwargs=None)` optimizes only the trainable intervention configured inside the renderer. The VLM is frozen and placed in evaluation mode during fitting; its weights are not updated. Gradients pass through the frozen VLM to the renderer's patch or perturbation parameters.
 
-`UniversalLocalPerturbation(size, epsilon, *, position="bottom_right", init="zeros", seed=2026, device=None, dtype=torch.float32)` creates one shared, bounded local additive perturbation, likewise usable with native-size images.
-
-Sizes in trainable tensor APIs use `(height, width)`. Explicit positions use `(x, y)`. Named positions are `top_left`, `top_right`, `bottom_left`, `bottom_right`, and `center`.
-
-All three expose a trainable `.parameter`, `apply(images)`, and `project_()`. Image parameters accept either a CHW tensor or BCHW batch. Fixed-canvas parameters enforce one canvas size. Native-size parameters accept varying image sizes and `ImageTrainer` applies them per sample, letting the model's native processor perform batching.
-
-
-`ImageSample(image, prompt, system_prompt=None, target=None, image_instruction=None)` describes one RGB float Tensor image in `[0, 1]`, its conversation, and optional image-embedded instruction. When `ImageRenderPipeline` is used as the image parameter, every sample must provide `image_instruction`. `ImageTrainer(vlm, image_parameter, objective, *, learning_rate=1e-2, optimizer_cls=torch.optim.Adam, optimizer_kwargs=None)` optimizes the shared image parameter or pipeline intervention.
 ```python
+renderer = ImageRenderer.from_yaml("configs/image_render.yaml")
+trainer = ImageTrainer(vlm, renderer, objective)
 history = trainer.fit(
     samples,
     max_steps=500,
@@ -155,7 +140,15 @@ history = trainer.fit(
 )
 ```
 
-`fit()` runs exactly `max_steps` updates and returns a tuple of `TrainingStep(step, loss, gradient_norm)` records. The model is frozen and placed in evaluation mode during fitting; only the universal image parameter is optimized.
+The objective receives `(model_outputs, model_inputs, samples)` and must return a scalar differentiable Tensor. `fit()` runs exactly `max_steps` updates and returns a tuple of `TrainingStep(step, loss, gradient_norm)` records.
+
+The implementation-specific PyTorch parameter classes are not part of the package-level public API. Select the intervention through YAML instead of constructing or managing those classes directly.
+
+## Visual input rendering (VIRP)
+
+VIRP's typography layout, band composition, and differentiable tensor composition are internal implementation details behind `ImageRenderer`. The package-level API exposes neither their helper classes nor their helper functions. The general-purpose `anchored_bbox((host_width, host_height), (patch_width, patch_height), anchor)` geometry helper remains available.
+
+See the [Visual Input Rendering Protocol](protocols/visual-input-rendering.md). The package does not bundle proprietary fonts or resize host images in these APIs.
 
 ## Reproducibility
 

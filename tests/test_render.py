@@ -11,7 +11,7 @@ from vlmbox.render import (
     compose_instruction_tensor,
     render_instruction_band,
 )
-from vlmbox.training import UniversalLocalPerturbation, UniversalPatch
+from vlmbox.training.image import UniversalLocalPerturbation, UniversalPatch
 
 
 @pytest.fixture

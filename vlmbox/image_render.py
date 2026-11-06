@@ -1,4 +1,4 @@
-"""YAML-configured visual input rendering and intervention pipeline."""
+"""YAML-configured image rendering with private differentiable intervention support."""
 
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from vlmbox.image import anchored_bbox, to_rgb
 from vlmbox.render import (
     BandPosition,
     InstructionStyle,
-    RenderedVisualInput,
     compose_instruction_image,
     compose_instruction_tensor,
     render_instruction_band,
@@ -91,16 +90,15 @@ def _size(value: Any) -> tuple[int, int]:
     )
 
 
-class ImageRenderPipeline(nn.Module):
-    """Execute one complete image-rendering configuration loaded from YAML.
+class ImageRenderer:
+    """YAML-configured image renderer with an optional trainable intervention.
 
-    The YAML file is the user-facing configuration surface. Trainable intervention
-    parameters are registered as child modules, so this object can be optimized,
-    moved between devices, checkpointed, and passed directly to ImageTrainer.
+    Public users load a renderer from YAML and call :meth:`render`. The
+    differentiable tensor path and intervention parameters are private and are
+    managed by ImageTrainer.
     """
 
     schema_version = 1
-    canvas_size = None
 
     def __init__(
         self,
@@ -116,15 +114,14 @@ class ImageRenderPipeline(nn.Module):
         config_sha256: str,
         config_source: Path,
     ) -> None:
-        super().__init__()
-        self.style = style
-        self.instruction_position = instruction_position
-        self.intervention_type = intervention_type
-        self.intervention_size = intervention_size
-        self.intervention_anchor = intervention_anchor
-        self.epsilon = epsilon
-        self.config_sha256 = config_sha256
-        self.config_source = config_source
+        self._style = style
+        self._instruction_position = instruction_position
+        self._intervention_type = intervention_type
+        self._intervention_size = intervention_size
+        self._intervention_anchor = intervention_anchor
+        self._epsilon = epsilon
+        self._config_sha256 = config_sha256
+        self._config_source = config_source
         # Training revisits the same sample instructions across optimization steps.
         # Cache bounded CPU band tensors to avoid rerunning Pillow/font layout each step.
         self._band_cache: OrderedDict[tuple[int, str, bool], Tensor] = OrderedDict()
@@ -132,7 +129,7 @@ class ImageRenderPipeline(nn.Module):
 
         if intervention_type == "overlay_patch":
             assert intervention_size is not None and intervention_anchor is not None
-            self.intervention: UniversalPatch | UniversalLocalPerturbation | None = UniversalPatch(
+            self._intervention: UniversalPatch | UniversalLocalPerturbation | None = UniversalPatch(
                 canvas_size=None,
                 size=intervention_size,
                 position=intervention_anchor,
@@ -145,7 +142,7 @@ class ImageRenderPipeline(nn.Module):
                 and intervention_anchor is not None
                 and epsilon is not None
             )
-            self.intervention = UniversalLocalPerturbation(
+            self._intervention = UniversalLocalPerturbation(
                 size=intervention_size,
                 epsilon=epsilon,
                 position=intervention_anchor,
@@ -153,13 +150,13 @@ class ImageRenderPipeline(nn.Module):
                 seed=seed,
             )
         else:
-            self.intervention = None
+            self._intervention = None
 
     @classmethod
     def from_yaml(
         cls, path: str | Path, *, device: torch.device | str | None = None
-    ) -> ImageRenderPipeline:
-        """Load and strictly validate a complete ImageRenderPipeline YAML config.
+    ) -> ImageRenderer:
+        """Load and strictly validate a complete ImageRenderer YAML config.
 
         Relative font paths are resolved relative to the YAML file's directory.
         Unknown keys and unsupported schema versions fail instead of being ignored.
@@ -176,10 +173,9 @@ class ImageRenderPipeline(nn.Module):
         version = _integer(root["schema_version"], "schema_version", minimum=1)
         if version != cls.schema_version:
             raise ValueError(
-                f"unsupported ImageRenderPipeline schema_version {version}; "
+                f"unsupported ImageRenderer schema_version {version}; "
                 f"supported version is {cls.schema_version}"
             )
-
         section = _mapping(
             root["image_render"],
             "image_render",
@@ -294,7 +290,7 @@ class ImageRenderPipeline(nn.Module):
                 "utf-8"
             )
         ).hexdigest()
-        pipeline = cls(
+        renderer = cls(
             style=style,
             instruction_position=position,
             intervention_type=intervention_type,
@@ -306,18 +302,18 @@ class ImageRenderPipeline(nn.Module):
             config_sha256=config_digest,
             config_source=config_path,
         )
-        return pipeline.to(device) if device is not None else pipeline
+        return renderer._to(device) if device is not None else renderer
 
     def _intervention_bbox(self, host_size: tuple[int, int]) -> tuple[int, int, int, int] | None:
-        if self.intervention_size is None or self.intervention_anchor is None:
+        if self._intervention_size is None or self._intervention_anchor is None:
             return None
-        height, width = self.intervention_size
-        return anchored_bbox(host_size, (width, height), self.intervention_anchor)
+        height, width = self._intervention_size
+        return anchored_bbox(host_size, (width, height), self._intervention_anchor)
 
     def _apply_intervention(self, host: Tensor) -> Tensor:
-        if self.intervention is None:
+        if self._intervention is None:
             return host
-        return self.intervention.apply(host)
+        return self._intervention.apply(host)
 
     def _instruction_band_tensor(
         self,
@@ -334,7 +330,7 @@ class ImageRenderPipeline(nn.Module):
             band = render_instruction_band(
                 instruction,
                 width=width,
-                style=self.style,
+                style=self._style,
                 draw_text=draw_text,
             )
             band_array = np.asarray(band.image, dtype=np.uint8).copy()
@@ -348,55 +344,77 @@ class ImageRenderPipeline(nn.Module):
             self._band_cache.move_to_end(key)
         return band_tensor.to(device=device, dtype=dtype).div(255)
 
-    def render_tensor(
+    def _render_tensor(
         self,
-        host: Tensor,
+        host_image: Image.Image,
         instruction: str,
         *,
         draw_text: bool = True,
     ) -> Tensor:
-        """Render an RGB CHW float host Tensor and preserve intervention gradients.
+        """Internal differentiable render path used only by ImageTrainer."""
+        if not isinstance(host_image, Image.Image):
+            raise TypeError("host_image must be a PIL.Image.Image")
+        rgb = to_rgb(host_image)
+        parameters = self._trainable_parameters()
+        device = parameters[0].device if parameters else torch.device("cpu")
+        dtype = parameters[0].dtype if parameters else torch.float32
+        host_array = np.asarray(rgb, dtype=np.uint8).copy()
+        host_tensor = (
+            torch.from_numpy(host_array)
+            .permute(2, 0, 1)
+            .contiguous()
+            .to(device=device, dtype=dtype)
+            .div(255)
+        )
 
-        Host tensors are expected to be RGB floats in [0, 1]. ImageSample performs
-        this validation once when samples enter ImageTrainer, avoiding GPU syncs
-        inside every optimization step.
-        """
-        if not isinstance(host, Tensor) or host.ndim != 3 or host.shape[0] != 3:
-            raise ValueError("host must be a CHW RGB Tensor")
-        if not host.is_floating_point():
-            raise TypeError("host must use a floating-point dtype")
-        if host.shape[-2] <= 0 or host.shape[-1] <= 0:
-            raise ValueError("host must have non-empty spatial dimensions")
-
-        modified = self._apply_intervention(host)
+        modified = self._apply_intervention(host_tensor)
         band_tensor = self._instruction_band_tensor(
-            width=host.shape[-1],
+            width=rgb.width,
             instruction=instruction,
             draw_text=draw_text,
-            device=host.device,
-            dtype=host.dtype,
+            device=host_tensor.device,
+            dtype=host_tensor.dtype,
         )
         return compose_instruction_tensor(
             modified,
             band_tensor,
-            position=self.instruction_position,
+            position=self._instruction_position,
         )
 
     def render(
         self,
-        host: Image.Image,
+        host_image: Image.Image,
         instruction: str,
         *,
         draw_text: bool = True,
-    ) -> RenderedVisualInput:
-        """Render a PIL host image, applying the configured intervention if present."""
-        rgb = to_rgb(host)
-        if self.intervention is None:
+        return_metadata: bool = False,
+    ) -> Image.Image | tuple[Image.Image, dict[str, object]]:
+        """Render a PIL host image and return a PIL image.
+
+        Metadata is returned as a plain dictionary only when explicitly requested.
+        """
+        if not isinstance(host_image, Image.Image):
+            raise TypeError("host_image must be a PIL.Image.Image")
+        if not isinstance(return_metadata, bool):
+            raise TypeError("return_metadata must be a bool")
+
+        rgb = to_rgb(host_image)
+        if self._intervention is None:
             modified = rgb
         else:
+            parameters = self._trainable_parameters()
+            device = parameters[0].device if parameters else torch.device("cpu")
+            dtype = parameters[0].dtype if parameters else torch.float32
             host_array = np.asarray(rgb, dtype=np.uint8).copy()
-            host_tensor = torch.from_numpy(host_array).permute(2, 0, 1).to(torch.float32).div(255)
-            modified_tensor = self._apply_intervention(host_tensor)
+            host_tensor = (
+                torch.from_numpy(host_array)
+                .permute(2, 0, 1)
+                .contiguous()
+                .to(device=device, dtype=dtype)
+                .div(255)
+            )
+            with torch.no_grad():
+                modified_tensor = self._apply_intervention(host_tensor)
             modified_array = (
                 modified_tensor.detach()
                 .cpu()
@@ -412,8 +430,8 @@ class ImageRenderPipeline(nn.Module):
         rendered = compose_instruction_image(
             modified,
             instruction,
-            self.style,
-            position=self.instruction_position,
+            self._style,
+            position=self._instruction_position,
             draw_text=draw_text,
         )
         local_bbox = self._intervention_bbox(rgb.size)
@@ -426,21 +444,30 @@ class ImageRenderPipeline(nn.Module):
                 local_bbox[2] + offset_x,
                 local_bbox[3] + offset_y,
             )
-        return replace(
+        rendered = replace(
             rendered,
             intervention_bbox=canvas_bbox,
-            intervention_type=self.intervention_type,
-            config_sha256=self.config_sha256,
+            intervention_type=self._intervention_type,
+            config_sha256=self._config_sha256,
             instruction_sha256=hashlib.sha256(instruction.encode("utf-8")).hexdigest(),
         )
+        if return_metadata:
+            return rendered.image, rendered.metadata()
+        return rendered.image
 
-    def project_(self) -> None:
-        """Project the configured trainable intervention to its feasible set."""
-        if self.intervention is not None:
-            self.intervention.project_()
+    def _trainable_parameters(self) -> tuple[nn.Parameter, ...]:
+        if self._intervention is None:
+            return ()
+        return tuple(self._intervention.parameters())
 
-    def forward(self, host: Tensor, instruction: str, *, draw_text: bool = True) -> Tensor:
-        return self.render_tensor(host, instruction, draw_text=draw_text)
+    def _project_(self) -> None:
+        if self._intervention is not None:
+            self._intervention.project_()
+
+    def _to(self, device: torch.device | str) -> ImageRenderer:
+        if self._intervention is not None:
+            self._intervention.to(device)
+        return self
 
 
-__all__ = ["ImageRenderPipeline"]
+__all__ = ["ImageRenderer"]

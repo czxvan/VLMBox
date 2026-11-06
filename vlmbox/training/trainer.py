@@ -1,44 +1,38 @@
-"""Universal image optimization against a frozen vision-language model."""
+"""Universal image-parameter optimization against a frozen vision-language model."""
 
 from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
+from PIL import Image
 from torch import Tensor
 from torch.optim import Optimizer
 
 from vlmbox.model import VLM
-from vlmbox.training.image import UniversalImageParameter
+
+if TYPE_CHECKING:
+    from vlmbox.image_render import ImageRenderer
 
 
 @dataclass(frozen=True)
 class ImageSample:
-    """One native-size RGB image and its conversation/in-image instruction."""
+    """One native-size PIL host image and its conversation/in-image instruction."""
 
-    image: Tensor
+    image: Image.Image
     prompt: str
     system_prompt: str | None = None
     target: str | None = None
     image_instruction: str | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.image, Tensor):
-            raise TypeError("image must be a torch.Tensor")
-        if self.image.ndim != 3 or self.image.shape[0] != 3:
-            raise ValueError("image must have shape [3, height, width]")
-        if self.image.shape[-2] <= 0 or self.image.shape[-1] <= 0:
+        if not isinstance(self.image, Image.Image):
+            raise TypeError("image must be a PIL.Image.Image")
+        if self.image.width <= 0 or self.image.height <= 0:
             raise ValueError("image must be non-empty")
-        if not self.image.is_floating_point():
-            raise TypeError("image must use a floating-point dtype")
-        image = self.image.detach()
-        if not bool(torch.isfinite(image).all().item()):
-            raise ValueError("image must contain only finite values")
-        if float(image.amin().item()) < 0.0 or float(image.amax().item()) > 1.0:
-            raise ValueError("image values must be in [0, 1]")
         if not isinstance(self.prompt, str) or not self.prompt.strip():
             raise ValueError("prompt must be a non-empty string")
         if self.system_prompt is not None and (
@@ -68,23 +62,28 @@ Objective = Callable[[Any, Mapping[str, Any], Sequence[ImageSample]], Tensor]
 
 
 class ImageTrainer:
-    """Optimize shared image parameters across one or several host resolutions.
+    """Optimize only an ImageRenderer's intervention parameters against a frozen VLM.
 
-    Native-size images are supported for parameters with canvas_size=None;
-    fixed-canvas parameters retain strict shape validation. The model's native
-    processor handles mixed image dimensions without implicit VLMBox resizing.
+    Host images remain PIL images in the dataset. ImageRenderer creates the
+    differentiable Tensor representation internally for each optimization step.
+    VLM weights are frozen during optimization and their original requires_grad
+    and training/evaluation states are restored afterwards.
     """
 
     def __init__(
         self,
         vlm: VLM,
-        image_parameter: UniversalImageParameter | torch.nn.Module,
+        renderer: ImageRenderer,
         objective: Objective,
         *,
         learning_rate: float = 1e-2,
         optimizer_cls: type[Optimizer] = torch.optim.Adam,
         optimizer_kwargs: Mapping[str, Any] | None = None,
     ) -> None:
+        from vlmbox.image_render import ImageRenderer as _ImageRenderer
+
+        if not isinstance(renderer, _ImageRenderer):
+            raise TypeError("renderer must be an ImageRenderer loaded from YAML")
         if not callable(objective):
             raise TypeError("objective must be callable")
         if isinstance(learning_rate, bool) or not isinstance(learning_rate, (int, float)):
@@ -92,27 +91,18 @@ class ImageTrainer:
         learning_rate = float(learning_rate)
         if not math.isfinite(learning_rate) or learning_rate <= 0.0:
             raise ValueError("learning_rate must be finite and positive")
-        is_render_pipeline = (
-            isinstance(image_parameter, torch.nn.Module)
-            and callable(getattr(image_parameter, "render_tensor", None))
-            and callable(getattr(image_parameter, "project_", None))
-            and getattr(image_parameter, "canvas_size", object()) is None
-        )
-        if not isinstance(image_parameter, UniversalImageParameter) and not is_render_pipeline:
-            raise TypeError(
-                "image_parameter must be a UniversalImageParameter or ImageRenderPipeline"
-            )
         if not isinstance(optimizer_cls, type) or not issubclass(optimizer_cls, Optimizer):
             raise TypeError("optimizer_cls must be a torch.optim.Optimizer class")
 
-        parameters = list(image_parameter.parameters())
+        parameters = list(renderer._trainable_parameters())
         if not parameters:
-            raise ValueError("image_parameter must expose trainable parameters")
+            raise ValueError(
+                "renderer has no trainable intervention; configure overlay_patch or local_additive"
+            )
         options = dict(optimizer_kwargs or {})
         options.setdefault("lr", learning_rate)
         self.vlm = vlm
-        self.image_parameter = image_parameter
-        self._uses_render_pipeline = is_render_pipeline
+        self.renderer = renderer
         self.objective = objective
         self.optimizer = optimizer_cls(parameters, **options)
 
@@ -148,7 +138,7 @@ class ImageTrainer:
         seed: int = 2026,
         forward_kwargs: Mapping[str, Any] | None = None,
     ) -> tuple[TrainingStep, ...]:
-        """Run exactly ``max_steps`` updates, cycling through the samples as needed."""
+        """Run exactly max_steps updates, cycling through the samples as needed."""
         if not isinstance(samples, Sequence) or isinstance(samples, (str, bytes)) or not samples:
             raise ValueError("samples must be a non-empty sequence of ImageSample objects")
         if any(not isinstance(sample, ImageSample) for sample in samples):
@@ -165,28 +155,14 @@ class ImageTrainer:
         if not 0 <= seed <= 2**63 - 1:
             raise ValueError("seed must be between 0 and 2**63 - 1")
 
-        canvas_sizes = {tuple(sample.image.shape[-2:]) for sample in samples}
-        if self.image_parameter.canvas_size is not None:
-            if len(canvas_sizes) != 1:
-                raise ValueError("all training images must have the same canvas size")
-            canvas_size = next(iter(canvas_sizes))
-            if canvas_size != self.image_parameter.canvas_size:
-                raise ValueError(
-                    f"dataset canvas {canvas_size} does not match image parameter canvas "
-                    f"{self.image_parameter.canvas_size}"
-                )
+        if any(sample.image_instruction is None for sample in samples):
+            raise ValueError("every sample must provide image_instruction for ImageRenderer")
         target_modes = {sample.target is not None for sample in samples}
-        image_instruction_modes = {sample.image_instruction is not None for sample in samples}
-        if self._uses_render_pipeline and image_instruction_modes != {True}:
-            raise ValueError(
-                "every sample must provide image_instruction when using ImageRenderPipeline"
-            )
-        if not self._uses_render_pipeline and image_instruction_modes != {False}:
-            raise ValueError("image_instruction requires ImageRenderPipeline as image_parameter")
         if len(target_modes) != 1:
             raise ValueError("all samples must either provide target text or omit it")
         add_generation_prompt = not next(iter(target_modes))
-        device = next(self.image_parameter.parameters()).device
+        parameters = self.renderer._trainable_parameters()
+        device = parameters[0].device
         options = {"use_cache": False}
         options.update(dict(forward_kwargs or {}))
 
@@ -214,33 +190,16 @@ class ImageTrainer:
                 cursor += len(batch_indices)
                 batch = [samples[index] for index in batch_indices]
 
-                if self._uses_render_pipeline:
-                    attacked_images = [
-                        self.image_parameter.render_tensor(
-                            sample.image.detach().to(device=device, dtype=torch.float32),
-                            sample.image_instruction,
-                        )
-                        for sample in batch
-                    ]
-                elif self.image_parameter.canvas_size is None:
-                    attacked_images = [
-                        self.image_parameter.apply(
-                            sample.image.detach().to(device=device, dtype=torch.float32)
-                        )
-                        for sample in batch
-                    ]
-                else:
-                    images = torch.stack(
-                        [
-                            sample.image.detach().to(device=device, dtype=torch.float32)
-                            for sample in batch
-                        ]
+                rendered_images = [
+                    self.renderer._render_tensor(
+                        sample.image,
+                        sample.image_instruction,
                     )
-                    attacked = self.image_parameter.apply(images)
-                    attacked_images = [attacked[index] for index in range(len(batch))]
+                    for sample in batch
+                ]
                 conversations = [
-                    self._conversation(sample, attacked_image)
-                    for sample, attacked_image in zip(batch, attacked_images, strict=True)
+                    self._conversation(sample, rendered_image)
+                    for sample, rendered_image in zip(batch, rendered_images, strict=True)
                 ]
                 inputs = self.vlm.prepare_differentiable(
                     conversations,
@@ -255,7 +214,7 @@ class ImageTrainer:
                     raise ValueError("objective must return a scalar Tensor")
                 if not loss.requires_grad:
                     raise ValueError(
-                        "objective must retain gradients to the universal image parameter"
+                        "objective must retain gradients to the renderer intervention parameters"
                     )
                 if not bool(torch.isfinite(loss.detach()).item()):
                     raise FloatingPointError("objective returned a non-finite loss")
@@ -263,20 +222,20 @@ class ImageTrainer:
                 loss.backward()
                 squared_norm = torch.zeros((), device=device, dtype=torch.float32)
                 has_gradient = False
-                for parameter in self.image_parameter.parameters():
+                for parameter in self.renderer._trainable_parameters():
                     if parameter.grad is not None:
                         has_gradient = True
                         squared_norm = squared_norm + parameter.grad.detach().float().square().sum()
                 if not has_gradient:
                     raise RuntimeError(
-                        "objective produced no gradient for the universal image parameter"
+                        "objective produced no gradient for the renderer intervention"
                     )
                 gradient_norm = float(torch.sqrt(squared_norm).detach().cpu())
                 if not math.isfinite(gradient_norm):
-                    raise FloatingPointError("universal image gradient is non-finite")
+                    raise FloatingPointError("renderer intervention gradient is non-finite")
 
                 self.optimizer.step()
-                self.image_parameter.project_()
+                self.renderer._project_()
                 self.optimizer.zero_grad(set_to_none=True)
                 history.append(
                     TrainingStep(

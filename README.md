@@ -61,7 +61,7 @@ print(vlm.processor.batch_decode(new_tokens, skip_special_tokens=True)[0])
 - [Public API reference](docs/api.md)
 - [Image preprocessing and gradients](docs/preprocessing.md)
 - [Visual Input Rendering Protocol (VIRP)](docs/protocols/visual-input-rendering.md)
-- [ImageRenderPipeline YAML example](examples/image_render.yaml)
+- [ImageRenderer YAML example](examples/image_render.yaml)
 
 Runnable examples are in [`examples/`](examples/).
 

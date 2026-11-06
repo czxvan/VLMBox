@@ -6,15 +6,15 @@ The geometry is independent of any model, dataset, or attack algorithm.
 
 ## User-facing configuration
 
-The project-facing entry point is ImageRenderPipeline.from_yaml(...). A project
+The project-facing entry point is `ImageRenderer.from_yaml(...)`. A project
 maintains one YAML file for typography, host-image preservation, and intervention
-settings; VLMBox validates it and executes the complete rendering path. Projects
-should not manually assemble the low-level rendering functions.
+settings; VLMBox validates it and executes the complete rendering path. The public
+renderer accepts `PIL.Image.Image` inputs and returns a PIL image. Tensor conversion,
+differentiable rendering, and intervention parameter management remain internal.
 
-See the complete [ImageRenderPipeline YAML example](../../examples/image_render.yaml).
+See the complete [ImageRenderer YAML example](../../examples/image_render.yaml).
 The Arial 20 px / top-band / bottom-right patch values in that example are a
 reference profile, not mandatory VLMBox defaults.
-
 ## Core contract
 
 1. A host image retains its decoded pixel dimensions and RGB values. The
@@ -44,18 +44,18 @@ reference profile, not mandatory VLMBox defaults.
 The example YAML uses ARGUS-compatible 20 px typography, 20 px margins,
 black-on-white centered text, and 4 px line spacing. These values are selected
 by that example profile; VLMBox's generic low-level style does not impose them.
-## Low-level Python primitives
+## Implementation boundary
 
-The lower-level renderer, geometry, composition, and intervention APIs remain
-available for specialized workflows. Most research projects should use
-ImageRenderPipeline and its YAML configuration instead.
+Typography layout, instruction-band construction, PIL/Tensor composition, and
+intervention parameter classes are internal implementation details. They are not
+package-level public APIs; projects should use `ImageRenderer` and its YAML
+configuration instead.
 
 All image sizes in the rendering/geometry helpers use Pillow's
-`(width, height)` convention. Sizes in trainable PyTorch parameterizations
-use `(height, width)`; explicit position coordinates use `(x, y)`.
-Buffers or cached renders must be versioned by font hash, layout settings,
-instruction content, and original image identity. Legacy fixed-canvas
+`(width, height)` convention. Sizes in internal trainable PyTorch
+parameterizations use `(height, width)`; explicit position coordinates use
+`(x, y)`. Buffers or cached renders must be versioned by font hash, layout
+settings, instruction content, and original image identity. Legacy fixed-canvas
 experiments are **not** directly comparable with this protocol.
-
 Model-specific native preprocessing remains the responsibility of Transformers
 and is intentionally outside VIRP.
