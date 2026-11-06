@@ -121,9 +121,7 @@ def test_first_forward_scope_is_one_shot_per_target_module() -> None:
     vlm = make_vlm()
     value = torch.tensor([1.0, 0.0])
 
-    with vlm.intervene(
-        "block", 0, "add", value=value, positions="last", scope="first_forward"
-    ):
+    with vlm.intervene("block", 0, "add", value=value, positions="last", scope="first_forward"):
         first = vlm.model(sample())
         second = vlm.model(sample())
 
@@ -135,9 +133,7 @@ def test_every_forward_scope_is_persistent() -> None:
     vlm = make_vlm()
     value = torch.tensor([1.0, 0.0])
 
-    with vlm.intervene(
-        "block", 0, "add", value=value, positions="last", scope="every_forward"
-    ):
+    with vlm.intervene("block", 0, "add", value=value, positions="last", scope="every_forward"):
         first = vlm.model(sample())
         second = vlm.model(sample())
 
@@ -269,6 +265,31 @@ def test_project_out_rejects_zero_direction() -> None:
     with pytest.raises(ActivationError, match="non-zero"):
         with vlm.intervene("block", 0, "project_out", value=torch.zeros(2)):
             vlm.model(sample())
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("magnitude", [1e-8, 1e-5, 10.0])
+def test_project_out_is_stable_for_low_precision_activations(dtype, magnitude) -> None:
+    vlm = make_vlm()
+    hidden = torch.ones(1, 2, 4096, dtype=dtype, requires_grad=True)
+    # Keep a small FP32 direction representable before computing its projection.
+    direction = torch.full((4096,), magnitude)
+    with vlm.intervene("block", 0, "project_out", value=direction, positions="last"):
+        output = vlm.model(hidden)
+    assert output.dtype == dtype
+    torch.testing.assert_close(output[:, 0], hidden[:, 0])
+    torch.testing.assert_close(output[:, 1], torch.zeros_like(output[:, 1]), atol=1e-5, rtol=0)
+    output.float().sum().backward()
+    assert torch.isfinite(hidden.grad).all()
+
+
+def test_project_out_accumulates_half_precision_directions_in_float32() -> None:
+    vlm = make_vlm()
+    hidden = torch.full((1, 1, 4096), 10.0, dtype=torch.float16)
+    direction = torch.full((4096,), 10.0, dtype=torch.float16)
+    with vlm.intervene("block", 0, "project_out", value=direction):
+        output = vlm.model(hidden)
+    torch.testing.assert_close(output, torch.zeros_like(output))
 
 
 def test_intervention_rejects_non_finite_value() -> None:

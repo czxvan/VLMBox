@@ -8,7 +8,7 @@ import pytest
 import torch
 
 import vlmbox
-from vlmbox.repro import set_seed
+from vlmbox.utils import set_seed
 
 
 def test_set_seed_is_exported_from_package_root() -> None:

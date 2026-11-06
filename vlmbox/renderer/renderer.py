@@ -1,13 +1,12 @@
-"""YAML-configured image rendering with private differentiable intervention support."""
+"""YAML-configured rendering and reusable image intervention weights."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 from collections import OrderedDict
-from dataclasses import replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import numpy as np
 import torch
@@ -15,21 +14,18 @@ import yaml
 from PIL import Image
 from torch import Tensor, nn
 
-from vlmbox.image import anchored_bbox, to_rgb
-from vlmbox.render import (
+from .intervention import Intervention
+from .layout import (
     BandPosition,
     InstructionStyle,
     compose_instruction_image,
-    compose_instruction_tensor,
+    image_tensor,
     render_instruction_band,
+    to_rgb,
 )
-from vlmbox.training.image import UniversalLocalPerturbation, UniversalPatch
-
-InterventionType = Literal["none", "overlay_patch", "local_additive"]
-Anchor = str | tuple[int, int]
 
 
-def _mapping(
+def config_mapping(
     value: Any, name: str, *, required: set[str], optional: set[str] | None = None
 ) -> dict:
     if not isinstance(value, dict):
@@ -44,13 +40,13 @@ def _mapping(
     return value
 
 
-def _integer(value: Any, name: str, *, minimum: int) -> int:
+def config_integer(value: Any, name: str, *, minimum: int) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
         raise ValueError(f"{name} must be an integer >= {minimum}")
     return value
 
 
-def _rgb(value: Any, name: str) -> tuple[int, int, int]:
+def config_rgb(value: Any, name: str) -> tuple[int, int, int]:
     if isinstance(value, str):
         text = value.removeprefix("#")
         if len(text) != 6:
@@ -60,42 +56,19 @@ def _rgb(value: Any, name: str) -> tuple[int, int, int]:
         except ValueError as exc:
             raise ValueError(f"{name} must be a valid #RRGGBB color") from exc
     if isinstance(value, list) and len(value) == 3:
-        channels = tuple(_integer(channel, f"{name} channel", minimum=0) for channel in value)
+        channels = tuple(config_integer(channel, f"{name} channel", minimum=0) for channel in value)
         if any(channel > 255 for channel in channels):
             raise ValueError(f"{name} channels must be <= 255")
         return channels
     raise ValueError(f"{name} must be a #RRGGBB color or a three-item RGB list")
 
 
-def _anchor(value: Any) -> Anchor:
-    valid = {"top_left", "top_right", "bottom_left", "bottom_right", "center"}
-    if isinstance(value, str):
-        if value not in valid:
-            raise ValueError(f"anchor must be one of {sorted(valid)}")
-        return value
-    if isinstance(value, list) and len(value) == 2:
-        x, y = value
-        if any(not isinstance(v, int) or isinstance(v, bool) or v < 0 for v in (x, y)):
-            raise ValueError("an explicit anchor must contain non-negative integer [x, y]")
-        return x, y
-    raise ValueError("anchor must be a named anchor or an explicit [x, y] coordinate")
-
-
-def _size(value: Any) -> tuple[int, int]:
-    if not isinstance(value, list) or len(value) != 2:
-        raise ValueError("intervention.size must be [height, width] in absolute pixels")
-    return (
-        _integer(value[0], "intervention.size[0] (height)", minimum=1),
-        _integer(value[1], "intervention.size[1] (width)", minimum=1),
-    )
-
-
-class ImageRenderer:
+class Renderer(nn.Module):
     """YAML-configured image renderer with an optional trainable intervention.
 
-    Public users load a renderer from YAML and call :meth:`render`. The
-    differentiable tensor path and intervention parameters are private and are
-    managed by ImageTrainer.
+    Load from YAML, render PIL images, and save or load intervention weights.
+    Calling the module returns a differentiable CHW Tensor. render() returns PIL.
+    Standard parameters() and to() support custom research optimization loops.
     """
 
     schema_version = 1
@@ -105,58 +78,21 @@ class ImageRenderer:
         *,
         style: InstructionStyle,
         instruction_position: BandPosition,
-        intervention_type: InterventionType,
-        intervention_size: tuple[int, int] | None,
-        intervention_anchor: Anchor | None,
-        epsilon: float | None,
-        init: Literal["zeros", "random"],
-        seed: int,
+        intervention: Intervention | None,
         config_sha256: str,
-        config_source: Path,
     ) -> None:
-        self._style = style
-        self._instruction_position = instruction_position
-        self._intervention_type = intervention_type
-        self._intervention_size = intervention_size
-        self._intervention_anchor = intervention_anchor
-        self._epsilon = epsilon
-        self._config_sha256 = config_sha256
-        self._config_source = config_source
-        # Training revisits the same sample instructions across optimization steps.
-        # Cache bounded CPU band tensors to avoid rerunning Pillow/font layout each step.
+        super().__init__()
+        self.style = style
+        self.instruction_position = instruction_position
+        self.config_sha256 = config_sha256
+        # Bound CPU typography tensors retained across optimization steps.
         self._band_cache: OrderedDict[tuple[int, str, bool], Tensor] = OrderedDict()
         self._band_cache_bytes = 0
-
-        if intervention_type == "overlay_patch":
-            assert intervention_size is not None and intervention_anchor is not None
-            self._intervention: UniversalPatch | UniversalLocalPerturbation | None = UniversalPatch(
-                canvas_size=None,
-                size=intervention_size,
-                position=intervention_anchor,
-                init=init,
-                seed=seed,
-            )
-        elif intervention_type == "local_additive":
-            assert (
-                intervention_size is not None
-                and intervention_anchor is not None
-                and epsilon is not None
-            )
-            self._intervention = UniversalLocalPerturbation(
-                size=intervention_size,
-                epsilon=epsilon,
-                position=intervention_anchor,
-                init=init,
-                seed=seed,
-            )
-        else:
-            self._intervention = None
+        self.intervention = intervention
 
     @classmethod
-    def from_yaml(
-        cls, path: str | Path, *, device: torch.device | str | None = None
-    ) -> ImageRenderer:
-        """Load and strictly validate a complete ImageRenderer YAML config.
+    def from_yaml(cls, path: str | Path, *, device: torch.device | str | None = None) -> Renderer:
+        """Load and strictly validate a complete Renderer YAML config.
 
         Relative font paths are resolved relative to the YAML file's directory.
         Unknown keys and unsupported schema versions fail instead of being ignored.
@@ -169,19 +105,19 @@ class ImageRenderer:
         except yaml.YAMLError as exc:
             raise ValueError(f"invalid YAML in {config_path}: {exc}") from exc
 
-        root = _mapping(raw, "config", required={"schema_version", "image_render"})
-        version = _integer(root["schema_version"], "schema_version", minimum=1)
+        root = config_mapping(raw, "config", required={"schema_version", "image_render"})
+        version = config_integer(root["schema_version"], "schema_version", minimum=1)
         if version != cls.schema_version:
             raise ValueError(
-                f"unsupported ImageRenderer schema_version {version}; "
+                f"unsupported Renderer schema_version {version}; "
                 f"supported version is {cls.schema_version}"
             )
-        section = _mapping(
+        section = config_mapping(
             root["image_render"],
             "image_render",
             required={"instruction", "host", "intervention"},
         )
-        instruction = _mapping(
+        instruction = config_mapping(
             section["instruction"],
             "image_render.instruction",
             required={
@@ -194,7 +130,7 @@ class ImageRenderer:
                 "line_spacing",
             },
         )
-        font = _mapping(
+        font = config_mapping(
             instruction["font"],
             "image_render.instruction.font",
             required={"path", "size"},
@@ -218,17 +154,17 @@ class ImageRenderer:
             raise ValueError("image_render.instruction.alignment must be left, center, or right")
         style = InstructionStyle(
             font_path=font_path,
-            font_size=_integer(font["size"], "font.size", minimum=1),
-            margin=_integer(instruction["margin"], "instruction.margin", minimum=0),
-            line_spacing=_integer(
+            font_size=config_integer(font["size"], "font.size", minimum=1),
+            margin=config_integer(instruction["margin"], "instruction.margin", minimum=0),
+            line_spacing=config_integer(
                 instruction["line_spacing"], "instruction.line_spacing", minimum=0
             ),
-            foreground=_rgb(instruction["foreground"], "instruction.foreground"),
-            background=_rgb(instruction["background"], "instruction.background"),
+            foreground=config_rgb(instruction["foreground"], "instruction.foreground"),
+            background=config_rgb(instruction["background"], "instruction.background"),
             alignment=alignment,
         )
 
-        host = _mapping(
+        host = config_mapping(
             section["host"],
             "image_render.host",
             required={"preserve_original_size", "color_space"},
@@ -238,7 +174,7 @@ class ImageRenderer:
         if host["color_space"] != "RGB":
             raise ValueError("VIRP currently requires host.color_space: RGB")
 
-        intervention = _mapping(
+        intervention = config_mapping(
             section["intervention"],
             "image_render.intervention",
             required={"type"},
@@ -258,7 +194,7 @@ class ImageRenderer:
         init = intervention.get(
             "init", "random" if intervention_type == "overlay_patch" else "zeros"
         )
-        seed = _integer(intervention.get("seed", 2026), "intervention.seed", minimum=0)
+        seed = config_integer(intervention.get("seed", 2026), "intervention.seed", minimum=0)
         if seed > 2**63 - 1:
             raise ValueError("intervention.seed must be <= 2**63 - 1")
         if intervention_type == "none":
@@ -269,8 +205,15 @@ class ImageRenderer:
             missing = required - intervention.keys()
             if missing:
                 raise ValueError(f"intervention is missing required keys: {sorted(missing)}")
-            intervention_size = _size(intervention["size"])
-            intervention_anchor = _anchor(intervention["anchor"])
+            size = intervention["size"]
+            if not isinstance(size, list) or len(size) != 2:
+                raise ValueError("intervention.size must be [height, width] in absolute pixels")
+            intervention_size = tuple(
+                config_integer(value, f"intervention.size[{index}]", minimum=1)
+                for index, value in enumerate(size)
+            )
+            anchor = intervention["anchor"]
+            intervention_anchor = tuple(anchor) if isinstance(anchor, list) else anchor
             if not isinstance(init, str) or init not in {"zeros", "random"}:
                 raise ValueError("intervention.init must be zeros or random")
             if intervention_type == "local_additive":
@@ -293,93 +236,50 @@ class ImageRenderer:
         renderer = cls(
             style=style,
             instruction_position=position,
-            intervention_type=intervention_type,
-            intervention_size=intervention_size,
-            intervention_anchor=intervention_anchor,
-            epsilon=epsilon,
-            init=init,
-            seed=seed,
+            intervention=(
+                None
+                if intervention_type == "none"
+                else Intervention(
+                    intervention_type,
+                    intervention_size,
+                    anchor=intervention_anchor,
+                    epsilon=epsilon,
+                    init=init,
+                    seed=seed,
+                )
+            ),
             config_sha256=config_digest,
-            config_source=config_path,
         )
-        return renderer._to(device) if device is not None else renderer
+        return renderer.to(device) if device is not None else renderer
 
-    def _intervention_bbox(self, host_size: tuple[int, int]) -> tuple[int, int, int, int] | None:
-        if self._intervention_size is None or self._intervention_anchor is None:
-            return None
-        height, width = self._intervention_size
-        return anchored_bbox(host_size, (width, height), self._intervention_anchor)
-
-    def _apply_intervention(self, host: Tensor) -> Tensor:
-        if self._intervention is None:
-            return host
-        return self._intervention.apply(host)
-
-    def _instruction_band_tensor(
-        self,
-        width: int,
-        instruction: str,
-        *,
-        draw_text: bool,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> Tensor:
-        key = (width, instruction, draw_text)
-        band_tensor = self._band_cache.get(key)
-        if band_tensor is None:
-            band = render_instruction_band(
-                instruction,
-                width=width,
-                style=self._style,
-                draw_text=draw_text,
-            )
-            band_array = np.asarray(band.image, dtype=np.uint8).copy()
-            band_tensor = torch.from_numpy(band_array).permute(2, 0, 1).contiguous()
-            self._band_cache[key] = band_tensor
-            self._band_cache_bytes += band_tensor.numel()
-            while len(self._band_cache) > 256 or self._band_cache_bytes > 128 * 1024 * 1024:
-                _, evicted = self._band_cache.popitem(last=False)
-                self._band_cache_bytes -= evicted.numel()
-        else:
-            self._band_cache.move_to_end(key)
-        return band_tensor.to(device=device, dtype=dtype).div(255)
-
-    def _render_tensor(
+    def forward(
         self,
         host_image: Image.Image,
         instruction: str,
         *,
         draw_text: bool = True,
     ) -> Tensor:
-        """Internal differentiable render path used only by ImageTrainer."""
-        if not isinstance(host_image, Image.Image):
-            raise TypeError("host_image must be a PIL.Image.Image")
-        rgb = to_rgb(host_image)
-        parameters = self._trainable_parameters()
-        device = parameters[0].device if parameters else torch.device("cpu")
-        dtype = parameters[0].dtype if parameters else torch.float32
-        host_array = np.asarray(rgb, dtype=np.uint8).copy()
-        host_tensor = (
-            torch.from_numpy(host_array)
-            .permute(2, 0, 1)
-            .contiguous()
-            .to(device=device, dtype=dtype)
-            .div(255)
-        )
-
-        modified = self._apply_intervention(host_tensor)
-        band_tensor = self._instruction_band_tensor(
-            width=rgb.width,
-            instruction=instruction,
-            draw_text=draw_text,
-            device=host_tensor.device,
-            dtype=host_tensor.dtype,
-        )
-        return compose_instruction_tensor(
-            modified,
-            band_tensor,
-            position=self._instruction_position,
-        )
+        """Render a differentiable RGB CHW Tensor in [0, 1], retaining parameter gradients."""
+        host = image_tensor(to_rgb(host_image))
+        if self.intervention is not None:
+            host = self.intervention(host.to(self.intervention.parameter))
+        key = (host.shape[-1], instruction, draw_text)
+        band = self._band_cache.get(key)
+        if band is None:
+            rendered_band = render_instruction_band(
+                instruction, width=host.shape[-1], style=self.style, draw_text=draw_text
+            )
+            band = torch.from_numpy(np.asarray(rendered_band.image).copy()).permute(2, 0, 1)
+            self._band_cache[key] = band
+            self._band_cache_bytes += band.numel()
+            while len(self._band_cache) > 256 or self._band_cache_bytes > 128 * 1024 * 1024:
+                _, evicted = self._band_cache.popitem(last=False)
+                self._band_cache_bytes -= evicted.numel()
+        else:
+            self._band_cache.move_to_end(key)
+        band = band.to(host).div(255)
+        parts = (band, host) if self.instruction_position == "top" else (host, band)
+        return torch.cat(parts, dim=1)
 
     def render(
         self,
@@ -399,22 +299,13 @@ class ImageRenderer:
             raise TypeError("return_metadata must be a bool")
 
         rgb = to_rgb(host_image)
-        if self._intervention is None:
+        if self.intervention is None:
             modified = rgb
         else:
-            parameters = self._trainable_parameters()
-            device = parameters[0].device if parameters else torch.device("cpu")
-            dtype = parameters[0].dtype if parameters else torch.float32
-            host_array = np.asarray(rgb, dtype=np.uint8).copy()
-            host_tensor = (
-                torch.from_numpy(host_array)
-                .permute(2, 0, 1)
-                .contiguous()
-                .to(device=device, dtype=dtype)
-                .div(255)
-            )
             with torch.no_grad():
-                modified_tensor = self._apply_intervention(host_tensor)
+                modified_tensor = self.intervention(
+                    image_tensor(rgb).to(self.intervention.parameter)
+                )
             modified_array = (
                 modified_tensor.detach()
                 .cpu()
@@ -430,11 +321,13 @@ class ImageRenderer:
         rendered = compose_instruction_image(
             modified,
             instruction,
-            self._style,
-            position=self._instruction_position,
+            self.style,
+            position=self.instruction_position,
             draw_text=draw_text,
         )
-        local_bbox = self._intervention_bbox(rgb.size)
+        if not return_metadata:
+            return rendered.image
+        local_bbox = self.intervention.bbox(rgb.size) if self.intervention is not None else None
         canvas_bbox = None
         if local_bbox is not None:
             offset_x, offset_y = rendered.host_bbox[:2]
@@ -444,30 +337,65 @@ class ImageRenderer:
                 local_bbox[2] + offset_x,
                 local_bbox[3] + offset_y,
             )
-        rendered = replace(
-            rendered,
-            intervention_bbox=canvas_bbox,
-            intervention_type=self._intervention_type,
-            config_sha256=self._config_sha256,
+        metadata = rendered.metadata()
+        metadata.update(
+            intervention_bbox=list(canvas_bbox) if canvas_bbox is not None else None,
+            intervention_type=self.intervention.kind if self.intervention is not None else "none",
+            config_sha256=self.config_sha256,
             instruction_sha256=hashlib.sha256(instruction.encode("utf-8")).hexdigest(),
         )
-        if return_metadata:
-            return rendered.image, rendered.metadata()
-        return rendered.image
+        if self.intervention is not None:
+            parameter = self.intervention.parameter.detach().cpu().contiguous()
+            metadata["intervention_sha256"] = hashlib.sha256(
+                parameter.view(torch.uint8).numpy().tobytes()
+            ).hexdigest()
+        return rendered.image, metadata
 
-    def _trainable_parameters(self) -> tuple[nn.Parameter, ...]:
-        if self._intervention is None:
-            return ()
-        return tuple(self._intervention.parameters())
+    def save_intervention(self, path: str | Path) -> None:
+        """Save intervention weights and geometry independently of hosts and typography."""
+        if self.intervention is None:
+            raise ValueError("renderer has no intervention to save or load")
+        spec = self.intervention.spec
+        torch.save(
+            {
+                "format": "vlmbox-intervention-1",
+                "spec": spec,
+                "parameter": self.intervention.parameter.detach().cpu(),
+            },
+            path,
+        )
 
-    def _project_(self) -> None:
-        if self._intervention is not None:
-            self._intervention.project_()
+    def load_intervention(self, path: str | Path) -> None:
+        """Restore compatible weights in place; reject invalid or out-of-bounds values."""
+        if self.intervention is None:
+            raise ValueError("renderer has no intervention to save or load")
+        spec = self.intervention.spec
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+        if not isinstance(checkpoint, dict) or checkpoint.get("format") != "vlmbox-intervention-1":
+            raise ValueError("unsupported intervention checkpoint format")
+        if checkpoint.get("spec") != spec:
+            raise ValueError(
+                "checkpoint intervention type, size, anchor and epsilon must match YAML"
+            )
+        parameter = self.intervention.parameter
+        value = checkpoint.get("parameter")
+        if not isinstance(value, Tensor) or not value.is_floating_point():
+            raise ValueError("checkpoint parameter must be a floating-point Tensor")
+        if value.shape != parameter.shape:
+            raise ValueError("checkpoint parameter shape does not match intervention")
+        value = value.to(dtype=parameter.dtype)
+        lower, upper = self.intervention.bounds
+        if not bool(torch.isfinite(value).all().item()):
+            raise ValueError("checkpoint parameter must contain finite values")
+        if bool(((value < lower) | (value > upper)).any().item()):
+            raise ValueError("checkpoint parameter exceeds intervention bounds")
+        with torch.no_grad():
+            parameter.copy_(value)
 
-    def _to(self, device: torch.device | str) -> ImageRenderer:
-        if self._intervention is not None:
-            self._intervention.to(device)
-        return self
+    def project_(self) -> None:
+        """Project optimized weights back into the configured intervention bounds."""
+        if self.intervention is not None:
+            self.intervention.project_()
 
 
-__all__ = ["ImageRenderer"]
+__all__ = ["Renderer"]

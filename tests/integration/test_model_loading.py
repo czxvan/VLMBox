@@ -27,9 +27,7 @@ def test_internvl_uses_untied_embeddings_without_tying_warning(caplog) -> None:
         input_embeddings = vlm.model.model.language_model.embed_tokens.weight
         output_embeddings = vlm.model.lm_head.weight
         assert input_embeddings.data_ptr() != output_embeddings.data_ptr()
-        assert not any(
-            "tied weights mapping" in record.message for record in caplog.records
-        )
+        assert not any("tied weights mapping" in record.message for record in caplog.records)
 
         inputs = vlm.prepare([{"role": "user", "content": "Say hello."}])
         inputs = inputs.to(vlm.input_device)

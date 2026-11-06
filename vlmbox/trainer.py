@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol
 
 import torch
 from PIL import Image
@@ -13,13 +13,11 @@ from torch import Tensor
 from torch.optim import Optimizer
 
 from vlmbox.model import VLM
-
-if TYPE_CHECKING:
-    from vlmbox.image_render import ImageRenderer
+from vlmbox.renderer import Renderer
 
 
 @dataclass(frozen=True)
-class ImageSample:
+class Sample:
     """One native-size PIL host image and its conversation/in-image instruction."""
 
     image: Image.Image
@@ -50,7 +48,7 @@ class ImageSample:
 
 
 @dataclass(frozen=True)
-class TrainingStep:
+class TrainStep:
     """Scalar diagnostics recorded after one universal image optimizer update."""
 
     step: int
@@ -58,13 +56,29 @@ class TrainingStep:
     gradient_norm: float
 
 
-Objective = Callable[[Any, Mapping[str, Any], Sequence[ImageSample]], Tensor]
+class LossFunction(Protocol):
+    """Compute a scalar minimization loss from one prepared model forward.
+
+    Inputs and samples share the output batch order. Inputs contain processed
+    tensors such as token IDs and attention masks; samples contain original
+    prompts and targets. Functions and callable objects satisfy this protocol.
+    """
+
+    def __call__(
+        self,
+        outputs: Any,
+        inputs: Mapping[str, Any],
+        samples: Sequence[Sample],
+        /,
+    ) -> Tensor:
+        """Return a finite scalar Tensor connected to the intervention parameters."""
+        ...
 
 
-class ImageTrainer:
-    """Optimize only an ImageRenderer's intervention parameters against a frozen VLM.
+class Trainer:
+    """Optimize only a Renderer's intervention parameters against a frozen VLM.
 
-    Host images remain PIL images in the dataset. ImageRenderer creates the
+    Host images remain PIL images in the dataset. Renderer creates the
     differentiable Tensor representation internally for each optimization step.
     VLM weights are frozen during optimization and their original requires_grad
     and training/evaluation states are restored afterwards.
@@ -73,19 +87,17 @@ class ImageTrainer:
     def __init__(
         self,
         vlm: VLM,
-        renderer: ImageRenderer,
-        objective: Objective,
+        renderer: Renderer,
+        loss_function: LossFunction,
         *,
         learning_rate: float = 1e-2,
         optimizer_cls: type[Optimizer] = torch.optim.Adam,
         optimizer_kwargs: Mapping[str, Any] | None = None,
     ) -> None:
-        from vlmbox.image_render import ImageRenderer as _ImageRenderer
-
-        if not isinstance(renderer, _ImageRenderer):
-            raise TypeError("renderer must be an ImageRenderer loaded from YAML")
-        if not callable(objective):
-            raise TypeError("objective must be callable")
+        if not isinstance(renderer, Renderer):
+            raise TypeError("renderer must be a Renderer loaded from YAML")
+        if not callable(loss_function):
+            raise TypeError("loss_function must be callable")
         if isinstance(learning_rate, bool) or not isinstance(learning_rate, (int, float)):
             raise TypeError("learning_rate must be a real number")
         learning_rate = float(learning_rate)
@@ -94,7 +106,7 @@ class ImageTrainer:
         if not isinstance(optimizer_cls, type) or not issubclass(optimizer_cls, Optimizer):
             raise TypeError("optimizer_cls must be a torch.optim.Optimizer class")
 
-        parameters = list(renderer._trainable_parameters())
+        parameters = list(renderer.parameters())
         if not parameters:
             raise ValueError(
                 "renderer has no trainable intervention; configure overlay_patch or local_additive"
@@ -103,46 +115,24 @@ class ImageTrainer:
         options.setdefault("lr", learning_rate)
         self.vlm = vlm
         self.renderer = renderer
-        self.objective = objective
+        self.loss_function = loss_function
         self.optimizer = optimizer_cls(parameters, **options)
-
-    @staticmethod
-    def _conversation(sample: ImageSample, image: Tensor) -> list[dict[str, Any]]:
-        messages: list[dict[str, Any]] = []
-        if sample.system_prompt is not None:
-            messages.append(
-                {"role": "system", "content": [{"type": "text", "text": sample.system_prompt}]}
-            )
-        messages.append(
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": image},
-                    {"type": "text", "text": sample.prompt},
-                ],
-            }
-        )
-        if sample.target is not None:
-            messages.append(
-                {"role": "assistant", "content": [{"type": "text", "text": sample.target}]}
-            )
-        return messages
 
     def fit(
         self,
-        samples: Sequence[ImageSample],
+        samples: Sequence[Sample],
         *,
         max_steps: int,
         batch_size: int = 1,
         shuffle: bool = True,
         seed: int = 2026,
         forward_kwargs: Mapping[str, Any] | None = None,
-    ) -> tuple[TrainingStep, ...]:
+    ) -> tuple[TrainStep, ...]:
         """Run exactly max_steps updates, cycling through the samples as needed."""
         if not isinstance(samples, Sequence) or isinstance(samples, (str, bytes)) or not samples:
-            raise ValueError("samples must be a non-empty sequence of ImageSample objects")
-        if any(not isinstance(sample, ImageSample) for sample in samples):
-            raise TypeError("every sample must be an ImageSample")
+            raise ValueError("samples must be a non-empty sequence of Sample objects")
+        if any(not isinstance(sample, Sample) for sample in samples):
+            raise TypeError("every sample must be a Sample")
         for name, value in (("max_steps", max_steps), ("batch_size", batch_size)):
             if not isinstance(value, int) or isinstance(value, bool):
                 raise TypeError(f"{name} must be an integer")
@@ -156,12 +146,12 @@ class ImageTrainer:
             raise ValueError("seed must be between 0 and 2**63 - 1")
 
         if any(sample.image_instruction is None for sample in samples):
-            raise ValueError("every sample must provide image_instruction for ImageRenderer")
+            raise ValueError("every sample must provide image_instruction for Renderer")
         target_modes = {sample.target is not None for sample in samples}
         if len(target_modes) != 1:
             raise ValueError("all samples must either provide target text or omit it")
         add_generation_prompt = not next(iter(target_modes))
-        parameters = self.renderer._trainable_parameters()
+        parameters = tuple(self.renderer.parameters())
         device = parameters[0].device
         options = {"use_cache": False}
         options.update(dict(forward_kwargs or {}))
@@ -169,14 +159,14 @@ class ImageTrainer:
         generator = torch.Generator(device="cpu").manual_seed(seed)
         order = list(range(len(samples)))
         cursor = len(order)
-        history: list[TrainingStep] = []
+        history: list[TrainStep] = []
         model_parameters = list(self.vlm.model.parameters())
         original_requires_grad = [parameter.requires_grad for parameter in model_parameters]
-        original_training = self.vlm.model.training
+        original_training = [(module, module.training) for module in self.vlm.model.modules()]
 
-        for parameter in model_parameters:
-            parameter.requires_grad_(False)
         try:
+            for parameter in model_parameters:
+                parameter.requires_grad_(False)
             self.vlm.model.eval()
             for step in range(1, max_steps + 1):
                 if cursor >= len(order):
@@ -190,57 +180,74 @@ class ImageTrainer:
                 cursor += len(batch_indices)
                 batch = [samples[index] for index in batch_indices]
 
-                rendered_images = [
-                    self.renderer._render_tensor(
-                        sample.image,
-                        sample.image_instruction,
+                conversations = []
+                for sample in batch:
+                    rendered_image = self.renderer(sample.image, sample.image_instruction)
+                    messages = []
+                    if sample.system_prompt is not None:
+                        messages.append(
+                            {
+                                "role": "system",
+                                "content": [{"type": "text", "text": sample.system_prompt}],
+                            }
+                        )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "image", "image": rendered_image},
+                                {"type": "text", "text": sample.prompt},
+                            ],
+                        }
                     )
-                    for sample in batch
-                ]
-                conversations = [
-                    self._conversation(sample, rendered_image)
-                    for sample, rendered_image in zip(batch, rendered_images, strict=True)
-                ]
+                    if sample.target is not None:
+                        messages.append(
+                            {
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": sample.target}],
+                            }
+                        )
+                    conversations.append(messages)
                 inputs = self.vlm.prepare_differentiable(
                     conversations,
                     add_generation_prompt=add_generation_prompt,
                 )
                 self.optimizer.zero_grad(set_to_none=True)
                 outputs = self.vlm.forward(inputs, **options)
-                loss = self.objective(outputs, inputs, batch)
-                if not isinstance(loss, Tensor):
-                    raise TypeError("objective must return a torch.Tensor")
-                if loss.ndim != 0:
-                    raise ValueError("objective must return a scalar Tensor")
-                if not loss.requires_grad:
+                loss_value = self.loss_function(outputs, inputs, batch)
+                if not isinstance(loss_value, Tensor):
+                    raise TypeError("loss_function must return a torch.Tensor")
+                if loss_value.ndim != 0:
+                    raise ValueError("loss_function must return a scalar Tensor")
+                if not loss_value.requires_grad:
                     raise ValueError(
-                        "objective must retain gradients to the renderer intervention parameters"
+                        "loss_function must retain gradients to intervention parameters"
                     )
-                if not bool(torch.isfinite(loss.detach()).item()):
-                    raise FloatingPointError("objective returned a non-finite loss")
+                if not bool(torch.isfinite(loss_value.detach()).item()):
+                    raise FloatingPointError("loss_function returned a non-finite value")
 
-                loss.backward()
+                loss_value.backward()
                 squared_norm = torch.zeros((), device=device, dtype=torch.float32)
                 has_gradient = False
-                for parameter in self.renderer._trainable_parameters():
+                for parameter in parameters:
                     if parameter.grad is not None:
                         has_gradient = True
                         squared_norm = squared_norm + parameter.grad.detach().float().square().sum()
                 if not has_gradient:
                     raise RuntimeError(
-                        "objective produced no gradient for the renderer intervention"
+                        "loss_function produced no gradient for the renderer intervention"
                     )
                 gradient_norm = float(torch.sqrt(squared_norm).detach().cpu())
                 if not math.isfinite(gradient_norm):
                     raise FloatingPointError("renderer intervention gradient is non-finite")
 
                 self.optimizer.step()
-                self.renderer._project_()
+                self.renderer.project_()
                 self.optimizer.zero_grad(set_to_none=True)
                 history.append(
-                    TrainingStep(
+                    TrainStep(
                         step=step,
-                        loss=float(loss.detach().cpu()),
+                        loss=float(loss_value.detach().cpu()),
                         gradient_norm=gradient_norm,
                     )
                 )
@@ -250,9 +257,10 @@ class ImageTrainer:
                 model_parameters, original_requires_grad, strict=True
             ):
                 parameter.requires_grad_(requires_grad)
-            self.vlm.model.train(original_training)
+            for module, training in original_training:
+                module.training = training
 
         return tuple(history)
 
 
-__all__ = ["ImageSample", "ImageTrainer", "Objective", "TrainingStep"]
+__all__ = ["Sample", "Trainer", "TrainStep", "LossFunction"]

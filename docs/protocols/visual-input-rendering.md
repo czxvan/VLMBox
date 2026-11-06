@@ -6,13 +6,16 @@ The geometry is independent of any model, dataset, or attack algorithm.
 
 ## User-facing configuration
 
-The project-facing entry point is `ImageRenderer.from_yaml(...)`. A project
+The project-facing entry point is `Renderer.from_yaml(...)`. A project
 maintains one YAML file for typography, host-image preservation, and intervention
 settings; VLMBox validates it and executes the complete rendering path. The public
-renderer accepts `PIL.Image.Image` inputs and returns a PIL image. Tensor conversion,
-differentiable rendering, and intervention parameter management remain internal.
+renderer accepts `PIL.Image.Image` inputs. `.render(...)` returns a PIL image;
+calling `renderer(...)` returns a differentiable CHW Tensor. Standard PyTorch
+`.parameters()` and `.to()` support custom loops; `.project_()` enforces bounds.
+Learned weights can be
+persisted with `save_intervention(...)` and restored with `load_intervention(...)`.
 
-See the complete [ImageRenderer YAML example](../../examples/image_render.yaml).
+See the complete [Renderer YAML example](../../examples/image_render.yaml).
 The Arial 20 px / top-band / bottom-right patch values in that example are a
 reference profile, not mandatory VLMBox defaults.
 ## Core contract
@@ -44,14 +47,22 @@ reference profile, not mandatory VLMBox defaults.
 The example YAML uses ARGUS-compatible 20 px typography, 20 px margins,
 black-on-white centered text, and 4 px line spacing. These values are selected
 by that example profile; VLMBox's generic low-level style does not impose them.
+
+## Rendering version
+
+Metadata reports `renderer: virp-2`. Line height uses the font's ascent/descent and
+actual glyph bounds; wrapping and alignment include italic overhangs. This keeps
+descenders and accents visible even with zero margins. Blank controls use the same
+layout. YAML schema version 1 is unchanged, but band heights and rendered pixels
+can differ from `virp-1`; regenerate cached composites when migrating.
 ## Implementation boundary
 
 Typography layout, instruction-band construction, PIL/Tensor composition, and
 intervention parameter classes are internal implementation details. They are not
-package-level public APIs; projects should use `ImageRenderer` and its YAML
+package-level public APIs; projects should use `Renderer` and its YAML
 configuration instead.
 
-All image sizes in the rendering/geometry helpers use Pillow's
+All image sizes in the renderer/geometry helpers use Pillow's
 `(width, height)` convention. Sizes in internal trainable PyTorch
 parameterizations use `(height, width)`; explicit position coordinates use
 `(x, y)`. Buffers or cached renders must be versioned by font hash, layout

@@ -45,8 +45,6 @@ def test_resolves_language_decoder_without_selecting_vision_layers() -> None:
     assert adapter.layer(0) is model.language_model.layers[0]
     assert adapter.attention(1) is model.language_model.layers[1].self_attn
     assert adapter.mlp(2) is model.language_model.layers[2].mlp
-    assert adapter.final_norm is model.language_model.norm
-    assert adapter.lm_head is model.lm_head
 
 
 def test_resolves_nested_text_model() -> None:
@@ -55,7 +53,6 @@ def test_resolves_nested_text_model() -> None:
 
     assert len(adapter.layers) == 2
     assert adapter.layer(1) is model.model.text_model.layers[1]
-    assert adapter.final_norm is model.model.text_model.norm
 
 
 class NestedDecoderWrapper(nn.Module):
@@ -71,12 +68,12 @@ class NestedDecoderModel(nn.Module):
         self.lm_head = nn.Linear(4, 16)
 
 
-def test_resolves_norm_inside_nested_decoder() -> None:
+def test_resolves_layers_inside_nested_decoder() -> None:
     model = NestedDecoderModel()
     adapter = TransformersAdapter(model)
 
     assert len(adapter.layers) == 2
-    assert adapter.final_norm is model.language_model.model.norm
+    assert adapter.layer(1) is model.language_model.model.layers[1]
 
 
 def test_layer_index_is_zero_based_and_checked() -> None:
@@ -114,7 +111,6 @@ def test_prefers_transformers_get_decoder_accessor() -> None:
 
     assert len(adapter.layers) == 4
     assert adapter.layer(0) is model.decoder.layers[0]
-    assert adapter.final_norm is model.decoder.norm
 
 
 def test_unsupported_model_fails_instead_of_guessing() -> None:

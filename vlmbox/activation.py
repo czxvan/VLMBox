@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import ExitStack
+from functools import partial
 from math import isfinite
 from typing import Literal
 
@@ -10,6 +12,7 @@ import torch
 from torch import Tensor, nn
 
 from vlmbox.adapter import ModelAdapter
+from vlmbox.utils import project
 
 Component = Literal["block", "attention", "mlp"]
 PositionSelector = Literal["all", "last"] | int | Sequence[int]
@@ -21,7 +24,7 @@ class ActivationError(ValueError):
     """Raised when an activation target or intervention is invalid."""
 
 
-def _normalize_layers(layers: int | Sequence[int], count: int) -> tuple[int, ...]:
+def layer_indices(layers: int | Sequence[int], count: int) -> tuple[int, ...]:
     if isinstance(layers, bool):
         raise TypeError("layers must be an integer or a sequence of integers")
     if isinstance(layers, int):
@@ -44,7 +47,7 @@ def _normalize_layers(layers: int | Sequence[int], count: int) -> tuple[int, ...
     return selected
 
 
-def _normalize_positions(positions: PositionSelector) -> str | tuple[int, ...]:
+def normalize_positions(positions: PositionSelector) -> str | tuple[int, ...]:
     if isinstance(positions, str):
         if positions not in ("all", "last"):
             raise ValueError("positions must be 'all', 'last', or integer indices")
@@ -65,7 +68,7 @@ def _normalize_positions(positions: PositionSelector) -> str | tuple[int, ...]:
     raise TypeError("positions must be 'all', 'last', or integer indices")
 
 
-def _resolve_modules(
+def target_modules(
     adapter: ModelAdapter,
     component: Component,
     layers: int | Sequence[int],
@@ -73,7 +76,7 @@ def _resolve_modules(
     if component not in ("block", "attention", "mlp"):
         raise ValueError("component must be 'block', 'attention', or 'mlp'")
 
-    indices = _normalize_layers(layers, len(adapter.layers))
+    indices = layer_indices(layers, len(adapter.layers))
     resolver = {
         "block": adapter.layer,
         "attention": adapter.attention,
@@ -82,7 +85,7 @@ def _resolve_modules(
     return tuple((index, resolver(index)) for index in indices)
 
 
-def _position_indices(tensor: Tensor, positions: str | tuple[int, ...]) -> Tensor | None:
+def token_indices(tensor: Tensor, positions: str | tuple[int, ...]) -> Tensor | None:
     if tensor.ndim == 0:
         raise ActivationError("activation output must have at least one dimension")
     if positions == "all":
@@ -114,14 +117,7 @@ def _position_indices(tensor: Tensor, positions: str | tuple[int, ...]) -> Tenso
     return torch.tensor(normalized, device=tensor.device, dtype=torch.long)
 
 
-def _select_positions(tensor: Tensor, positions: str | tuple[int, ...]) -> Tensor:
-    indices = _position_indices(tensor, positions)
-    if indices is None:
-        return tensor
-    return tensor.index_select(-2, indices)
-
-
-def _first_tensor(output: object) -> Tensor:
+def activation_tensor(output: object) -> Tensor:
     if isinstance(output, Tensor):
         return output
     if isinstance(output, (tuple, list)) and output and isinstance(output[0], Tensor):
@@ -129,46 +125,6 @@ def _first_tensor(output: object) -> Tensor:
     raise ActivationError(
         "target module must return a tensor or a tuple/list starting with a tensor"
     )
-
-
-def _replace_first_tensor(output: object, transform) -> object:
-    if isinstance(output, Tensor):
-        return transform(output)
-    if isinstance(output, tuple):
-        if not output or not isinstance(output[0], Tensor):
-            raise ActivationError(
-                "target module must return a tensor or a tuple/list starting with a tensor"
-            )
-        updated = transform(output[0])
-        if hasattr(output, "_fields"):
-            return type(output)(updated, *output[1:])
-        return (updated, *output[1:])
-    if isinstance(output, list):
-        if not output or not isinstance(output[0], Tensor):
-            raise ActivationError(
-                "target module must return a tensor or a tuple/list starting with a tensor"
-            )
-        updated = list(output)
-        updated[0] = transform(output[0])
-        return updated
-    raise ActivationError(
-        "target module must return a tensor or a tuple/list starting with a tensor"
-    )
-
-
-def _move_transformers_output_capture_hooks_after(module: nn.Module) -> None:
-    """Keep Transformers' persistent output-capture hooks after active edits."""
-    hooks = module._forward_hooks
-    capture_hooks = [
-        (key, hook)
-        for key, hook in hooks.items()
-        if getattr(hook, "__module__", None) == "transformers.utils.output_capturing"
-        and getattr(hook, "__name__", None) == "output_capturing_hook"
-    ]
-    for key, _hook in capture_hooks:
-        hooks.pop(key)
-    for key, hook in capture_hooks:
-        hooks[key] = hook
 
 
 class ActivationCapture:
@@ -181,48 +137,36 @@ class ActivationCapture:
         layers: int | Sequence[int],
         positions: PositionSelector = "last",
     ) -> None:
-        self._targets = _resolve_modules(adapter, component, layers)
-        self._positions = _normalize_positions(positions)
+        self._targets = target_modules(adapter, component, layers)
+        self._positions = normalize_positions(positions)
         self.values: dict[int, Tensor] = {}
-        self._handles: list[torch.utils.hooks.RemovableHandle] = []
+        self._stack = ExitStack()
         self._entered = False
 
     def __enter__(self) -> ActivationCapture:
         if self._entered:
             raise RuntimeError("an activation capture context cannot be entered more than once")
         self._entered = True
-        try:
+
+        def record(index: int, _module, _inputs, output):
+            if index not in self.values:
+                tensor = activation_tensor(output)
+                indices = token_indices(tensor, self._positions)
+                selected = tensor if indices is None else tensor.index_select(-2, indices)
+                self.values[index] = selected.clone()
+
+        with ExitStack() as stack:
             for index, module in self._targets:
-                self._handles.append(module.register_forward_hook(self._make_hook(index)))
-        except Exception:
-            self._remove_hooks()
-            raise
+                handle = module.register_forward_hook(partial(record, index))
+                stack.callback(handle.remove)
+            self._stack = stack.pop_all()
         return self
-
-    def _make_hook(self, index: int):
-        captured = False
-
-        def hook(_module: nn.Module, _inputs: tuple[object, ...], output: object) -> object:
-            nonlocal captured
-            if not captured:
-                tensor = _first_tensor(output)
-                self.values[index] = _select_positions(tensor, self._positions).clone()
-                captured = True
-            return output
-
-        return hook
 
     def __getitem__(self, layer: int) -> Tensor:
         return self.values[layer]
 
-    def _remove_hooks(self) -> None:
-        for handle in self._handles:
-            handle.remove()
-        self._handles.clear()
-
     def __exit__(self, exc_type, exc_value, traceback) -> bool:
-        self._remove_hooks()
-        return False
+        return self._stack.__exit__(exc_type, exc_value, traceback)
 
 
 class ActivationIntervention:
@@ -246,8 +190,8 @@ class ActivationIntervention:
         positions: PositionSelector = "last",
         scope: InterventionScope = "every_forward",
     ) -> None:
-        self._targets = _resolve_modules(adapter, component, layer)
-        self._positions = _normalize_positions(positions)
+        self._targets = target_modules(adapter, component, layer)
+        self._positions = normalize_positions(positions)
         if operation not in ("add", "replace", "project_out", "zero"):
             raise ValueError("operation must be 'add', 'replace', 'project_out', or 'zero'")
         if scope not in ("first_forward", "every_forward"):
@@ -268,7 +212,7 @@ class ActivationIntervention:
         self._value = value
         self._scale = float(scale)
         self._scope = scope
-        self._handles: list[torch.utils.hooks.RemovableHandle] = []
+        self._stack = ExitStack()
         self._entered = False
 
     def __enter__(self) -> ActivationIntervention:
@@ -277,48 +221,48 @@ class ActivationIntervention:
                 "an activation intervention context cannot be entered more than once"
             )
         self._entered = True
-        try:
-            for _index, module in self._targets:
-                self._handles.append(module.register_forward_hook(self._make_hook()))
-                _move_transformers_output_capture_hooks_after(module)
-        except Exception:
-            self._remove_hooks()
-            raise
-        return self
-
-    def _make_hook(self):
         applied = False
 
-        def hook(_module: nn.Module, _inputs: tuple[object, ...], output: object) -> object:
+        def edit(_module, _inputs, output):
             nonlocal applied
             if self._scope == "first_forward" and applied:
                 return output
-            updated = _replace_first_tensor(
-                output,
-                lambda tensor: _apply_intervention(
-                    tensor,
-                    self._positions,
-                    self._operation,
-                    self._value,
-                    self._scale,
-                ),
+            updated = edit_activation(
+                activation_tensor(output),
+                self._positions,
+                self._operation,
+                self._value,
+                self._scale,
             )
             applied = True
-            return updated
+            if isinstance(output, Tensor):
+                return updated
+            if isinstance(output, list):
+                return [updated, *output[1:]]
+            if hasattr(output, "_fields"):
+                return type(output)(updated, *output[1:])
+            return (updated, *output[1:])
 
-        return hook
-
-    def _remove_hooks(self) -> None:
-        for handle in self._handles:
-            handle.remove()
-        self._handles.clear()
+        module = self._targets[0][1]
+        with ExitStack() as stack:
+            stack.callback(module.register_forward_hook(edit).remove)
+            # Native Transformers traces must observe the edited output. Keep all
+            # other hooks in registration order, including nested user captures.
+            hooks = module._forward_hooks
+            for key, hook in list(hooks.items()):
+                if (
+                    getattr(hook, "__module__", None) == "transformers.utils.output_capturing"
+                    and getattr(hook, "__name__", None) == "output_capturing_hook"
+                ):
+                    hooks[key] = hooks.pop(key)
+            self._stack = stack.pop_all()
+        return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> bool:
-        self._remove_hooks()
-        return False
+        return self._stack.__exit__(exc_type, exc_value, traceback)
 
 
-def _apply_intervention(
+def edit_activation(
     tensor: Tensor,
     positions: str | tuple[int, ...],
     operation: InterventionOperation,
@@ -328,14 +272,19 @@ def _apply_intervention(
     if not tensor.is_floating_point():
         raise ActivationError("activation interventions require floating-point tensors")
 
-    indices = _position_indices(tensor, positions)
+    indices = token_indices(tensor, positions)
     selected = tensor if indices is None else tensor.index_select(-2, indices)
 
     if operation == "zero":
         updated = torch.zeros_like(selected)
     else:
         assert value is not None
-        direction = value.to(device=selected.device, dtype=selected.dtype)
+        dtype = (
+            torch.promote_types(selected.dtype, value.dtype)
+            if operation == "project_out"
+            else selected.dtype
+        )
+        direction = value.to(device=selected.device, dtype=dtype)
         try:
             direction = torch.broadcast_to(direction, selected.shape)
         except RuntimeError as exc:
@@ -351,12 +300,25 @@ def _apply_intervention(
         elif operation == "replace":
             updated = direction
         else:
-            norm_squared = direction.square().sum(dim=-1, keepdim=True)
-            if torch.any(norm_squared == 0).item():
-                raise ActivationError("project_out direction must be non-zero")
-            coefficient = (selected * direction).sum(dim=-1, keepdim=True) / norm_squared
-            updated = selected - scale * coefficient * direction
+            try:
+                projection = project(selected, direction)
+            except ValueError as exc:
+                raise ActivationError(
+                    f"project_out requires a non-zero finite direction: {exc}"
+                ) from exc
+            updated = (selected.to(projection.dtype) - scale * projection).to(selected.dtype)
 
     if indices is None:
         return updated
     return tensor.index_copy(-2, indices, updated)
+
+
+__all__ = [
+    "ActivationCapture",
+    "ActivationError",
+    "ActivationIntervention",
+    "Component",
+    "PositionSelector",
+    "InterventionOperation",
+    "InterventionScope",
+]

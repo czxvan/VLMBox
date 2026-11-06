@@ -287,9 +287,7 @@ def test_prepare_differentiable_preserves_gradient_and_uses_processor_kwargs() -
         }
     ]
 
-    prepared = vlm.prepare_differentiable(
-        messages, chat_template_kwargs={"enable_thinking": False}
-    )
+    prepared = vlm.prepare_differentiable(messages, chat_template_kwargs={"enable_thinking": False})
     assert prepared["processor_kwargs"] == {"padding": True, "do_rescale": False}
     assert prepared["enable_thinking"] is False
     prepared_image = prepared["messages"][0][0]["content"][0]["image"]
@@ -298,3 +296,50 @@ def test_prepare_differentiable_preserves_gradient_and_uses_processor_kwargs() -
     assert image.grad is not None
     assert torch.count_nonzero(image.grad) > 0
     assert messages[0]["content"][0]["image"] is image
+
+
+def test_wrap_native_objects_infers_decoder_and_preserves_model_state() -> None:
+    model = FakeModel().train()
+    model.language_model.norm.eval()
+    model.lm_head.weight.requires_grad_(False)
+    modes = [module.training for module in model.modules()]
+    flags = [parameter.requires_grad for parameter in model.parameters()]
+    processor = FakeProcessor()
+
+    vlm = VLM(model, processor)
+
+    assert vlm.model is model
+    assert vlm.processor is processor
+    assert vlm.adapter.layer(0) is model.language_model.layers[0]
+    assert [module.training for module in model.modules()] == modes
+    assert [parameter.requires_grad for parameter in model.parameters()] == flags
+    assert vlm.input_device == next(model.parameters()).device
+    assert processor.tokenizer.padding_side == "left"
+
+
+def test_wrap_native_objects_accepts_a_custom_adapter() -> None:
+    model = nn.Linear(2, 2)
+    adapter = types.SimpleNamespace(layers=[model])
+    vlm = VLM(model, FakeProcessor(), adapter=adapter)
+    assert vlm.adapter is adapter
+    assert vlm.model is model
+
+
+def test_differentiable_preparation_preserves_open_assistant_prefix_options() -> None:
+    vlm = VLM(FakeModel(), FakeProcessor())
+    image = torch.rand(3, 8, 8, requires_grad=True)
+    messages = [
+        {"role": "user", "content": [{"type": "image", "image": image}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "Let me"}]},
+    ]
+    prepared = vlm.prepare_differentiable(
+        messages,
+        add_generation_prompt=False,
+        chat_template_kwargs={"continue_final_message": True, "enable_thinking": False},
+    )
+    assert prepared["add_generation_prompt"] is False
+    assert prepared["continue_final_message"] is True
+    assert prepared["enable_thinking"] is False
+    assert prepared["messages"][0][-1] == messages[-1]
+    prepared["messages"][0][0]["content"][0]["image"].sum().backward()
+    torch.testing.assert_close(image.grad, torch.ones_like(image))

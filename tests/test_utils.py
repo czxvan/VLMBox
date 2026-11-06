@@ -5,13 +5,11 @@ import math
 import pytest
 import torch
 
-from vlmbox.representation import (
-    angle,
+from vlmbox.utils import (
     cosine_similarity,
     mean_difference,
     normalize_direction,
     project,
-    projection_coefficient,
     projection_length,
 )
 
@@ -84,14 +82,12 @@ def test_normalize_direction_rejects_zero_and_non_finite_values() -> None:
         normalize_direction(torch.tensor([float("nan"), 1.0]))
 
 
-def test_projection_coefficient_and_vector_projection() -> None:
+def test_vector_projection() -> None:
     hidden = torch.tensor([[3.0, 4.0], [1.0, 2.0]])
     direction = torch.tensor([1.0, 0.0])
 
-    coefficient = projection_coefficient(hidden, direction)
     component = project(hidden, direction)
 
-    assert torch.equal(coefficient, torch.tensor([3.0, 1.0]))
     assert torch.equal(component, torch.tensor([[3.0, 0.0], [1.0, 0.0]]))
 
 
@@ -124,14 +120,12 @@ def test_projection_residual_is_orthogonal_to_direction() -> None:
     assert torch.allclose(inner_product, torch.zeros_like(inner_product), atol=1e-6)
 
 
-def test_projection_supports_broadcasting_and_keepdim() -> None:
+def test_projection_supports_broadcasting() -> None:
     hidden = torch.tensor([[[3.0, 4.0], [1.0, 2.0]], [[5.0, 6.0], [7.0, 8.0]]])
     direction = torch.tensor([1.0, 0.0])
 
-    coefficient = projection_coefficient(hidden, direction, keepdim=True)
     component = project(hidden, direction)
 
-    assert coefficient.shape == (2, 2, 1)
     assert component.shape == hidden.shape
     assert torch.equal(component[..., 0], hidden[..., 0])
     assert torch.count_nonzero(component[..., 1]) == 0
@@ -151,25 +145,20 @@ def test_projection_rejects_zero_direction() -> None:
         project(torch.ones(3), torch.zeros(3))
 
 
-def test_cosine_similarity_and_angle() -> None:
+def test_cosine_similarity() -> None:
     first = torch.tensor([[1.0, 0.0], [1.0, 1.0]])
     second = torch.tensor([[0.0, 1.0], [1.0, 0.0]])
 
     similarity = cosine_similarity(first, second)
-    radians = angle(first, second)
-    degrees = angle(first, second, degrees=True)
 
     assert torch.allclose(similarity, torch.tensor([0.0, 1 / math.sqrt(2)]))
-    assert torch.allclose(radians, torch.tensor([math.pi / 2, math.pi / 4]))
-    assert torch.allclose(degrees, torch.tensor([90.0, 45.0]))
 
 
-def test_cosine_and_angle_support_broadcasting() -> None:
+def test_cosine_supports_broadcasting() -> None:
     first = torch.tensor([[[1.0, 0.0], [0.0, 1.0]]])
     second = torch.tensor([1.0, 0.0])
 
     assert torch.allclose(cosine_similarity(first, second), torch.tensor([[1.0, 0.0]]))
-    assert torch.allclose(angle(first, second, degrees=True), torch.tensor([[0.0, 90.0]]))
 
 
 def test_cosine_rejects_zero_vectors() -> None:
@@ -192,7 +181,6 @@ def test_geometry_promotes_half_precision_to_float32() -> None:
     hidden = torch.tensor([3.0, 4.0], dtype=torch.float16)
     direction = torch.tensor([1.0, 0.0], dtype=torch.float16)
 
-    assert projection_coefficient(hidden, direction).dtype == torch.float32
     assert project(hidden, direction).dtype == torch.float32
     assert cosine_similarity(hidden, direction).dtype == torch.float32
 
@@ -204,5 +192,3 @@ def test_invalid_dimensions_and_eps_are_rejected() -> None:
         normalize_direction(torch.ones(3), eps=0)
     with pytest.raises(TypeError, match="dim"):
         cosine_similarity(torch.ones(3), torch.ones(3), dim=True)
-    with pytest.raises(TypeError, match="keepdim"):
-        projection_coefficient(torch.ones(3), torch.ones(3), keepdim=1)

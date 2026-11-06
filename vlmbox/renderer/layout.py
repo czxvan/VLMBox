@@ -3,14 +3,26 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageFont
 
-from .image import to_rgb
+
+def to_rgb(image: Image.Image) -> Image.Image:
+    """Return an independent RGB copy of a PIL image.
+
+    Pillow's standard RGB conversion is used; an existing alpha channel is
+    discarded rather than composited onto a background.
+    """
+    if not isinstance(image, Image.Image):
+        raise TypeError("image must be a PIL.Image.Image")
+    return image.copy() if image.mode == "RGB" else image.convert("RGB")
+
 
 Box = tuple[int, int, int, int]
 BandPosition = Literal["top", "bottom"]
@@ -57,10 +69,6 @@ class InstructionStyle:
             ):
                 raise ValueError(f"{name} must be an RGB integer tuple")
 
-    @property
-    def spacing(self) -> int:
-        return self.line_spacing
-
 
 @dataclass(frozen=True)
 class InstructionBand:
@@ -81,14 +89,10 @@ class RenderedVisualInput:
     font_size: int
     font_sha256: str
     position: BandPosition
-    intervention_bbox: Box | None = None
-    intervention_type: str | None = None
-    config_sha256: str | None = None
-    instruction_sha256: str | None = None
 
     def metadata(self) -> dict[str, object]:
         metadata: dict[str, object] = {
-            "renderer": "virp-1",
+            "renderer": "virp-2",
             "canvas_size": list(self.image.size),
             "instruction_bbox": list(self.instruction_bbox),
             "host_bbox": list(self.host_bbox),
@@ -101,19 +105,15 @@ class RenderedVisualInput:
             "font_sha256": self.font_sha256,
             "instruction_position": self.position,
         }
-        if self.intervention_type is not None:
-            metadata["intervention_type"] = self.intervention_type
-            metadata["intervention_bbox"] = (
-                list(self.intervention_bbox) if self.intervention_bbox is not None else None
-            )
-        if self.config_sha256 is not None:
-            metadata["config_sha256"] = self.config_sha256
-        if self.instruction_sha256 is not None:
-            metadata["instruction_sha256"] = self.instruction_sha256
         return metadata
 
 
-def _wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int) -> tuple[str, ...]:
+def text_width(text: str, font: ImageFont.FreeTypeFont) -> float:
+    left, _, right, _ = font.getbbox(text)
+    return max(font.getlength(text), right) - min(0, left)
+
+
+def wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int) -> tuple[str, ...]:
     """Width-aware word wrapping; split overlong words by character without clipping."""
     lines: list[str] = []
     for paragraph in text.splitlines():
@@ -129,17 +129,17 @@ def _wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int) -> tuple
                 start, end = 1, len(word)
                 while start < end:
                     middle = (start + end + 1) // 2
-                    if font.getlength(word[:middle]) <= max_width:
+                    if text_width(word[:middle], font) <= max_width:
                         start = middle
                     else:
                         end = middle - 1
-                if font.getlength(word[:start]) > max_width:
+                if text_width(word[:start], font) > max_width:
                     raise ValueError("a single glyph is wider than the available text region")
                 pieces.append(word[:start])
                 word = word[start:]
             for i, piece in enumerate(pieces):
                 candidate = f"{current} {piece}" if current and i == 0 else piece
-                if current and font.getlength(candidate) > max_width:
+                if current and text_width(candidate, font) > max_width:
                     lines.append(current)
                     current = piece
                 elif current and i > 0:
@@ -172,24 +172,31 @@ def render_instruction_band(
     if not path.is_file():
         raise FileNotFoundError(f"font file does not exist: {path}")
     font = ImageFont.truetype(str(path), size=style.font_size)
-    lines = _wrap_text(instruction, font, width - 2 * style.margin)
+    lines = wrap_text(instruction, font, width - 2 * style.margin)
+    # Font size is not a glyph's height: descenders, accents and italic bearings
+    # can extend beyond it. Reserve full line metrics and align the actual ink top.
+    line_height = max(
+        sum(font.getmetrics()),
+        *(font.getbbox(line)[3] - font.getbbox(line)[1] for line in lines),
+    )
     height = (
-        2 * style.margin + len(lines) * style.font_size + max(0, len(lines) - 1) * style.spacing
+        2 * style.margin + len(lines) * line_height + max(0, len(lines) - 1) * style.line_spacing
     )
     band = Image.new("RGB", (width, height), style.background)
     if draw_text:
         draw = ImageDraw.Draw(band)
         y = style.margin
         for line in lines:
-            text_width = font.getlength(line)
+            line_width = math.ceil(text_width(line, font))
             if style.alignment == "left":
                 x = style.margin
             elif style.alignment == "right":
-                x = int(width - style.margin - text_width)
+                x = int(width - style.margin - line_width)
             else:
-                x = int((width - text_width) // 2)
-            draw.text((x, y), line, fill=style.foreground, font=font)
-            y += style.font_size + style.spacing
+                x = int((width - line_width) // 2)
+            x -= min(0, font.getbbox(line)[0])
+            draw.text((x, y), line, fill=style.foreground, font=font, anchor="lt")
+            y += line_height + style.line_spacing
     return InstructionBand(
         image=band,
         lines=lines,
@@ -237,30 +244,6 @@ def compose_instruction_image(
     )
 
 
-def compose_instruction_tensor(
-    host: torch.Tensor, band: torch.Tensor, *, position: BandPosition = "top"
-) -> torch.Tensor:
-    """Differentiably concatenate CHW host and CHW instruction tensors."""
-    if position not in ("top", "bottom"):
-        raise ValueError("position must be top or bottom")
-    if not isinstance(host, torch.Tensor) or not isinstance(band, torch.Tensor):
-        raise TypeError("host and band must be tensors")
-    if host.ndim != 3 or band.ndim != 3 or host.shape[0] != 3 or band.shape[0] != 3:
-        raise ValueError("host and band must be CHW RGB tensors")
-    if host.shape[-1] != band.shape[-1]:
-        raise ValueError("host and band widths must match")
-    if host.device != band.device:
-        raise ValueError("host and band must share a device")
-    if host.dtype != band.dtype or not host.is_floating_point():
-        raise ValueError("host and band must have the same floating-point dtype")
-    return torch.cat((band, host) if position == "top" else (host, band), dim=1)
-
-
-__all__ = [
-    "InstructionStyle",
-    "InstructionBand",
-    "RenderedVisualInput",
-    "render_instruction_band",
-    "compose_instruction_image",
-    "compose_instruction_tensor",
-]
+def image_tensor(image: Image.Image) -> torch.Tensor:
+    """Convert an RGB PIL image to a CPU float32 CHW tensor in [0, 1]."""
+    return torch.from_numpy(np.asarray(image).copy()).permute(2, 0, 1).contiguous().float().div(255)

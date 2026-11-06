@@ -9,13 +9,15 @@ VLMBox delegates model-specific image processing to each model's native Transfor
 Use `prepare()` for ordinary inference with the image and content types accepted by the model's native chat template and processor. A typical message is:
 
 ```python
-messages = [{
-    "role": "user",
-    "content": [
-        {"type": "image", "image": pil_image},
-        {"type": "text", "text": "Describe the image."},
-    ],
-}]
+messages = [
+    {
+        "role": "user",
+        "content": [
+            {"type": "image", "image": pil_image},
+            {"type": "text", "text": "Describe the image."},
+        ],
+    }
+]
 inputs = vlm.prepare(messages)
 ```
 
@@ -29,13 +31,15 @@ Each image item must contain an RGB `torch.Tensor` with shape `[3, height, width
 
 ```python
 image = torch.rand(3, 224, 224, requires_grad=True)
-messages = [{
-    "role": "user",
-    "content": [
-        {"type": "image", "image": image},
-        {"type": "text", "text": "Describe the image."},
-    ],
-}]
+messages = [
+    {
+        "role": "user",
+        "content": [
+            {"type": "image", "image": image},
+            {"type": "text", "text": "Describe the image."},
+        ],
+    }
+]
 inputs = vlm.prepare_differentiable(messages)
 outputs = vlm.forward(inputs)
 loss = outputs.logits.float().square().mean()
@@ -66,7 +70,7 @@ inputs = vlm.prepare(
 )
 ```
 
-For supervised target preparation, `prepare_differentiable()` also accepts `add_generation_prompt=False` when the conversation already contains the assistant target.
+For supervised target preparation, both methods accept `add_generation_prompt=False` when the conversation already contains the assistant target.
 
 ## What is and is not guaranteed
 

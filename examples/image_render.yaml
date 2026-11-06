@@ -1,4 +1,4 @@
-# ImageRenderer configuration, schema version 1.
+# Renderer configuration, schema version 1.
 # Font paths are resolved relative to this YAML file.
 # Supply a licensed local Arial font at this path, or change it to your font file.
 schema_version: 1

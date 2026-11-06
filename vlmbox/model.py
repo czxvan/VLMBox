@@ -1,4 +1,4 @@
-"""Unified Transformers runtime for ModelScope-hosted vision-language models."""
+"""Native model access, differentiable preparation, and decoder interventions."""
 
 from __future__ import annotations
 
@@ -19,157 +19,56 @@ from vlmbox.activation import (
     PositionSelector,
 )
 from vlmbox.adapter import ModelAdapter, TransformersAdapter
-from vlmbox.generation import (
-    FinishReason,
-    GenerationStep,
-    GenerationTrace,
-    GenerationTraceError,
-)
+from vlmbox.generation import GenerationTrace, generate_trace
 
 
-def _internvl_config_with_untied_embeddings(model_path: str, auto_config: Any) -> Any | None:
-    """Correct InternVL's omitted outer tying flag when its text model is untied.
+def move_inputs(inputs: Mapping[str, Any], device: torch.device) -> Any:
+    """Move native batch objects or tensor-valued mappings to the input device."""
+    if hasattr(inputs, "to"):
+        return inputs.to(device)
+    return {
+        key: value.to(device) if isinstance(value, Tensor) else value
+        for key, value in inputs.items()
+    }
 
-    Some InternVL checkpoints omit the top-level ``tie_word_embeddings`` field.
-    ``InternVLConfig`` defaults it to True even when the nested text config (for
-    example, Qwen3) defaults to untied embeddings. Preserve explicit checkpoint
-    settings and only supply a corrected config for this specific omission.
-    """
-    config_path = Path(model_path) / "config.json"
-    if not config_path.is_file():
-        return None
 
-    raw_config = json.loads(config_path.read_text(encoding="utf-8"))
-    if raw_config.get("model_type") != "internvl":
-        return None
-    if "tie_word_embeddings" in raw_config:
-        return None
-
-    config = auto_config.from_pretrained(
-        model_path,
-        trust_remote_code=True,
+def chat_inputs(
+    processor: Any,
+    messages: Any,
+    add_generation_prompt: bool,
+    chat_template_kwargs: Mapping[str, Any] | None,
+    processor_kwargs: dict[str, Any],
+) -> Any:
+    if not isinstance(add_generation_prompt, bool):
+        raise TypeError("add_generation_prompt must be a bool")
+    if chat_template_kwargs is not None and not isinstance(chat_template_kwargs, Mapping):
+        raise TypeError("chat_template_kwargs must be a mapping or None")
+    return processor.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=add_generation_prompt,
+        return_dict=True,
+        return_tensors="pt",
+        processor_kwargs=processor_kwargs,
+        **dict(chat_template_kwargs or {}),
     )
-    text_config = getattr(config, "text_config", None)
-    if getattr(text_config, "tie_word_embeddings", None) is False:
-        config.tie_word_embeddings = False
-        return config
-    return None
-
-
-def _normalize_generation_layers(
-    layers: int | Sequence[int],
-    count: int,
-) -> tuple[int, ...]:
-    if isinstance(layers, bool):
-        raise TypeError("hidden_state_layers must be an integer or a sequence of integers")
-    if isinstance(layers, int):
-        selected = (layers,)
-    elif isinstance(layers, Sequence) and not isinstance(layers, (str, bytes)):
-        selected = tuple(layers)
-    else:
-        raise TypeError("hidden_state_layers must be an integer or a sequence of integers")
-
-    if not selected:
-        raise ValueError("hidden_state_layers must contain at least one layer")
-    if any(not isinstance(index, int) or isinstance(index, bool) for index in selected):
-        raise TypeError("every hidden-state layer index must be an integer")
-    if len(set(selected)) != len(selected):
-        raise ValueError("hidden_state_layers must not contain duplicate indices")
-    if any(index < 0 or index >= count for index in selected):
-        raise IndexError(f"hidden-state layer index must be in the range [0, {count})")
-    return selected
-
-
-def _generation_option(name: str, kwargs: Mapping[str, Any], model: Any) -> Any:
-    if name in kwargs:
-        return kwargs[name]
-    config = kwargs.get("generation_config")
-    if config is None:
-        config = getattr(model, "generation_config", None)
-    if isinstance(config, Mapping):
-        return config.get(name)
-    return getattr(config, name, None)
-
-
-def _normalize_token_ids(value: Any) -> tuple[int, ...]:
-    if value is None or isinstance(value, bool):
-        return ()
-    if isinstance(value, int):
-        return (value,)
-    if isinstance(value, Tensor):
-        value = value.detach().cpu().reshape(-1).tolist()
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        return ()
-    if any(not isinstance(token_id, int) or isinstance(token_id, bool) for token_id in value):
-        return ()
-    return tuple(value)
-
-
-def _infer_finish_reasons(
-    sequences: Tensor,
-    prompt_length: int,
-    model: Any,
-    generation_kwargs: Mapping[str, Any],
-) -> tuple[FinishReason, ...]:
-    """Infer EOS and explicit length-limit stops; leave other causes unknown."""
-    generated = sequences[:, prompt_length:]
-    eos_ids = _normalize_token_ids(
-        _generation_option("eos_token_id", generation_kwargs, model)
-    )
-    max_new_tokens = _generation_option("max_new_tokens", generation_kwargs, model)
-    max_length = _generation_option("max_length", generation_kwargs, model)
-    pad_ids = _normalize_token_ids(
-        _generation_option("pad_token_id", generation_kwargs, model)
-    )
-    forced_eos_ids = _normalize_token_ids(
-        _generation_option("forced_eos_token_id", generation_kwargs, model)
-    )
-    ambiguous_eos_ids = set(eos_ids).intersection((*pad_ids, *forced_eos_ids))
-    unambiguous_eos_ids = set(eos_ids).difference(ambiguous_eos_ids)
-    has_custom_stop = (
-        bool(generation_kwargs.get("stopping_criteria"))
-        or bool(_generation_option("stop_strings", generation_kwargs, model))
-        or _generation_option("max_time", generation_kwargs, model) is not None
-        or generation_kwargs.get("custom_generate") is not None
-    )
-
-    if isinstance(max_new_tokens, int) and not isinstance(max_new_tokens, bool):
-        reached_length = generated.shape[1] >= max_new_tokens
-    else:
-        reached_length = (
-            isinstance(max_length, int)
-            and not isinstance(max_length, bool)
-            and sequences.shape[1] >= max_length
-        )
-
-    generated_rows = generated.detach().cpu().tolist()
-    reasons: list[FinishReason] = []
-    for row in generated_rows:
-        if any(token_id in unambiguous_eos_ids for token_id in row):
-            reasons.append("eos")
-        elif any(token_id in ambiguous_eos_ids for token_id in row):
-            reasons.append("unknown")
-        elif reached_length and not has_custom_stop:
-            reasons.append("length")
-        else:
-            reasons.append("unknown")
-    return tuple(reasons)
 
 
 class VLM:
     """A thin research-oriented wrapper around a Transformers multimodal model.
 
-    Load models by ModelScope ID only. Trusted ModelScope repository code is
-    enabled to support model-specific processors and architectures.
+    Wrap an existing native model and processor, or load a ModelScope checkpoint
+    with from_pretrained(). The native objects remain available to research adapters.
     """
 
     def __init__(
         self,
-        model_id: str,
-        model_path: str,
         model: Any,
         processor: Any,
-        adapter: ModelAdapter,
+        *,
+        adapter: ModelAdapter | None = None,
+        model_id: str | None = None,
+        model_path: str | None = None,
     ) -> None:
         self.model_id = model_id
         self.model_path = model_path
@@ -180,7 +79,7 @@ class VLM:
             tokenizer = processor
         if hasattr(tokenizer, "padding_side"):
             tokenizer.padding_side = "left"
-        self.adapter = adapter
+        self.adapter = TransformersAdapter(model) if adapter is None else adapter
 
     @classmethod
     def from_pretrained(
@@ -220,9 +119,7 @@ class VLM:
                 "Transformers 5.x with AutoModelForMultimodalLM is required."
             ) from exc
 
-        model_path = str(
-            snapshot_download(model_id.strip(), local_files_only=local_files_only)
-        )
+        model_path = str(snapshot_download(model_id.strip(), local_files_only=local_files_only))
         processor = AutoProcessor.from_pretrained(
             model_path,
             trust_remote_code=True,
@@ -232,14 +129,26 @@ class VLM:
             "device_map": "auto",
             "trust_remote_code": True,
         }
-        model_config = _internvl_config_with_untied_embeddings(model_path, AutoConfig)
-        if model_config is not None:
-            model_kwargs["config"] = model_config
+        # Some InternVL checkpoints omit the outer tying flag while their text
+        # config is untied. Preserve explicit values, correct only that omission.
+        config_path = Path(model_path) / "config.json"
+        if config_path.is_file():
+            raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+            if (
+                raw_config.get("model_type") == "internvl"
+                and "tie_word_embeddings" not in raw_config
+            ):
+                config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+                if (
+                    getattr(getattr(config, "text_config", None), "tie_word_embeddings", None)
+                    is False
+                ):
+                    config.tie_word_embeddings = False
+                    model_kwargs["config"] = config
         model = AutoModelForMultimodalLM.from_pretrained(model_path, **model_kwargs)
 
         model.eval()
-        adapter = TransformersAdapter(model)
-        return cls(model_id.strip(), model_path, model, processor, adapter)
+        return cls(model, processor, model_id=model_id.strip(), model_path=model_path)
 
     @property
     def input_device(self) -> torch.device:
@@ -253,15 +162,6 @@ class VLM:
             raise RuntimeError(
                 "model has no parameters from which to infer an input device"
             ) from exc
-
-    def _move_inputs_to_device(self, inputs: Mapping[str, Any]) -> Any:
-        device = self.input_device
-        if hasattr(inputs, "to"):
-            return inputs.to(device)
-        return {
-            key: value.to(device) if isinstance(value, Tensor) else value
-            for key, value in inputs.items()
-        }
 
     def capture(
         self,
@@ -304,23 +204,17 @@ class VLM:
         self,
         messages: Sequence[Mapping[str, Any]] | Sequence[Sequence[Mapping[str, Any]]],
         *,
+        add_generation_prompt: bool = True,
         chat_template_kwargs: Mapping[str, Any] | None = None,
     ) -> Any:
-        """Prepare one conversation or a batch with left padding for generation.
+        """Prepare one conversation or a batch with the native chat template.
 
+        Set add_generation_prompt=False for conversations containing an assistant target.
         ``chat_template_kwargs`` passes model-specific variables to the native
-        Transformers chat template, for example ``{"enable_thinking": False}.
+        Transformers chat template, for example ``{"enable_thinking": False}``.
         """
-        if chat_template_kwargs is not None and not isinstance(chat_template_kwargs, Mapping):
-            raise TypeError("chat_template_kwargs must be a mapping or None")
-        return self.processor.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_dict=True,
-            return_tensors="pt",
-            processor_kwargs={"padding": True},
-            **dict(chat_template_kwargs or {}),
+        return chat_inputs(
+            self.processor, messages, add_generation_prompt, chat_template_kwargs, {"padding": True}
         )
 
     def prepare_differentiable(
@@ -339,15 +233,7 @@ class VLM:
         LANCZOS) are preserved. The resulting BatchFeature is then moved to the
         model input device; both transfers remain differentiable.
         """
-        if not isinstance(add_generation_prompt, bool):
-            raise TypeError("add_generation_prompt must be a bool")
-        if chat_template_kwargs is not None and not isinstance(chat_template_kwargs, Mapping):
-            raise TypeError("chat_template_kwargs must be a mapping or None")
-        if (
-            not isinstance(messages, Sequence)
-            or isinstance(messages, (str, bytes))
-            or not messages
-        ):
+        if not isinstance(messages, Sequence) or isinstance(messages, (str, bytes)) or not messages:
             raise ValueError("messages must be a non-empty conversation or batch of conversations")
 
         first = messages[0]
@@ -407,16 +293,14 @@ class VLM:
                 raise ValueError(f"conversation {conversation_index} contains no Tensor image")
             conversations.append(copied_messages)
 
-        inputs = self.processor.apply_chat_template(
+        inputs = chat_inputs(
+            self.processor,
             conversations,
-            tokenize=True,
-            add_generation_prompt=add_generation_prompt,
-            return_dict=True,
-            return_tensors="pt",
-            processor_kwargs={"padding": True, "do_rescale": False},
-            **dict(chat_template_kwargs or {}),
+            add_generation_prompt,
+            chat_template_kwargs,
+            {"padding": True, "do_rescale": False},
         )
-        return self._move_inputs_to_device(inputs)
+        return move_inputs(inputs, self.input_device)
 
     def forward(self, inputs: Mapping[str, Any], **forward_kwargs: Any) -> Any:
         """Run a normal autograd-enabled model forward pass on prepared inputs.
@@ -426,25 +310,14 @@ class VLM:
         """
         if not isinstance(inputs, Mapping):
             raise TypeError("inputs must be a mapping returned by a VLM preparation method")
-        return self.model(**self._move_inputs_to_device(inputs), **forward_kwargs)
+        return self.model(**move_inputs(inputs, self.input_device), **forward_kwargs)
 
     def generate(self, inputs: Mapping[str, Any], **generation_kwargs: Any) -> Any:
         """Run Transformers generation using prepared model inputs."""
         if not isinstance(inputs, Mapping):
             raise TypeError("inputs must be a mapping returned by VLM.prepare() or the processor")
 
-        device = getattr(self.model, "device", None)
-        if device is not None:
-            if hasattr(inputs, "to"):
-                inputs = inputs.to(device)
-            else:
-                import torch
-
-                inputs = {
-                    key: value.to(device) if isinstance(value, torch.Tensor) else value
-                    for key, value in inputs.items()
-                }
-        return self.model.generate(**inputs, **generation_kwargs)
+        return self.model.generate(**move_inputs(inputs, self.input_device), **generation_kwargs)
 
     def generate_trace(
         self,
@@ -458,176 +331,27 @@ class VLM:
     ) -> GenerationTrace:
         """Generate normally and return a structured, opt-in internal trace.
 
-        Transformers still owns the generation loop and all decoding semantics.
-        Raw logits and decoder hidden states are disabled by default because they
-        can retain substantial GPU memory. When hidden states are requested,
-        zero-based decoder layer indices are passed to Transformers' native
-        selective output-capture mechanism; only those layer outputs are retained.
+        Layers are zero-based decoder block indices, shared with capture() and
+        intervene(). Hidden states are direct block outputs before final model
+        normalization. Only selected blocks are recorded; native hidden-state
+        tuple layouts do not affect the result.
 
-        A trace step records the forward pass that predicts its token_ids:
-        step zero is prompt prefill, and later steps are autoregressive decode.
-        The step's hidden states describe the prompt or preceding input token(s),
-        not the token selected from that step's logits.
-
-        Transformers does not expose a standard finish-reason field. VLMBox marks
-        EOS or an explicit length limit only when observable; other stop causes
-        remain unknown. This trace adapter currently supports decoder-only models;
-        beam-search internal capture is rejected until beam histories can be aligned.
+        Each step records the forward pass predicting its token: prompt prefill
+        first, then decode. Internal capture supports decoder-only generation
+        with num_beams=1 and one block forward per generated token.
         """
-        if not isinstance(inputs, Mapping):
-            raise TypeError("inputs must be a mapping returned by VLM.prepare() or the processor")
-        if not isinstance(capture_logits, bool):
-            raise TypeError("capture_logits must be a bool")
-        if not isinstance(capture_hidden_states, bool):
-            raise TypeError("capture_hidden_states must be a bool")
-        if not isinstance(decode_text, bool):
-            raise TypeError("decode_text must be a bool")
-        if hidden_state_layers is not None and not capture_hidden_states:
-            raise ValueError("hidden_state_layers requires capture_hidden_states=True")
-        if capture_hidden_states and hidden_state_layers is None:
-            raise ValueError(
-                "capture_hidden_states=True requires an explicit hidden_state_layers selection"
-            )
-
-        controlled_options = {
-            "return_dict_in_generate",
-            "output_logits",
-            "output_hidden_states",
-        }
-        conflicts = controlled_options.intersection(generation_kwargs)
-        if conflicts:
-            names = ", ".join(sorted(conflicts))
-            raise ValueError(f"generate_trace controls these generation options: {names}")
-
-        input_ids = inputs.get("input_ids")
-        if not isinstance(input_ids, Tensor) or input_ids.ndim != 2:
-            raise GenerationTraceError(
-                "generate_trace requires two-dimensional input_ids to identify the prompt length"
-            )
-        prompt_length = input_ids.shape[1]
-        model_config = getattr(self.model, "config", None)
-        if getattr(model_config, "is_encoder_decoder", False):
-            raise GenerationTraceError(
-                "generate_trace currently supports decoder-only models, not encoder-decoder models"
-            )
-
-        selected_layers: tuple[int, ...] = ()
-        if capture_hidden_states:
-            selected_layers = _normalize_generation_layers(
-                hidden_state_layers,
-                len(self.adapter.layers),
-            )
-
-        num_beams = _generation_option("num_beams", generation_kwargs, self.model)
-        if (capture_logits or capture_hidden_states) and num_beams not in (None, 1):
-            raise ValueError(
-                "capturing per-step logits or hidden states currently requires num_beams=1; "
-                "beam outputs need beam-history alignment"
-            )
-
-        output = self.generate(
+        return generate_trace(
+            self,
             inputs,
-            return_dict_in_generate=True,
-            output_logits=capture_logits,
-            output_hidden_states=selected_layers if capture_hidden_states else False,
+            capture_logits=capture_logits,
+            capture_hidden_states=capture_hidden_states,
+            hidden_state_layers=hidden_state_layers,
+            decode_text=decode_text,
             **generation_kwargs,
-        )
-        sequences = getattr(output, "sequences", None)
-        if not isinstance(sequences, Tensor) or sequences.ndim != 2:
-            raise GenerationTraceError(
-                "generation output must expose two-dimensional sequences; "
-                "ensure the model supports return_dict_in_generate"
-            )
-        if prompt_length > sequences.shape[1]:
-            raise GenerationTraceError(
-                "returned sequence is shorter than the supplied prompt token length"
-            )
-
-        generated_count = sequences.shape[1] - prompt_length
-        raw_logits = getattr(output, "logits", None)
-        if capture_logits:
-            if not isinstance(raw_logits, Sequence) or len(raw_logits) != generated_count:
-                raise GenerationTraceError(
-                    "the model did not return one logits tensor per generated token"
-                )
-
-        raw_hidden_states = getattr(output, "hidden_states", None)
-        if capture_hidden_states:
-            if (
-                not isinstance(raw_hidden_states, Sequence)
-                or len(raw_hidden_states) != generated_count
-            ):
-                raise GenerationTraceError(
-                    "the model did not return one hidden-state collection per generated token"
-                )
-
-        steps: list[GenerationStep] = []
-        for index in range(generated_count):
-            logits = raw_logits[index] if capture_logits else None
-            hidden_state_map: dict[int, Tensor] = {}
-            if capture_hidden_states:
-                layer_outputs = raw_hidden_states[index]
-                if not isinstance(layer_outputs, Sequence):
-                    raise GenerationTraceError(
-                        "each hidden-state collection must be a sequence of layer tensors"
-                    )
-                layer_count = len(self.adapter.layers)
-                if len(layer_outputs) == layer_count + 1:
-                    offset = 1
-                elif len(layer_outputs) == layer_count:
-                    offset = 0
-                else:
-                    raise GenerationTraceError(
-                        f"hidden-state collection has {len(layer_outputs)} entries; "
-                        f"expected {layer_count} decoder layers, optionally preceded by embeddings"
-                    )
-                for layer in selected_layers:
-                    state = layer_outputs[layer + offset]
-                    if not isinstance(state, Tensor):
-                        raise GenerationTraceError(
-                            f"hidden state for decoder layer {layer} is not a tensor; "
-                            "the model may not support Transformers' selective "
-                            "output_hidden_states layer selection"
-                        )
-                    hidden_state_map[layer] = state
-
-            steps.append(
-                GenerationStep(
-                    index=index,
-                    phase="prefill" if index == 0 else "decode",
-                    token_ids=sequences[:, prompt_length + index],
-                    logits=logits,
-                    hidden_states=hidden_state_map,
-                )
-            )
-
-        finish_reasons = _infer_finish_reasons(
-            sequences,
-            prompt_length,
-            self.model,
-            generation_kwargs,
-        )
-
-        texts = None
-        if decode_text:
-            batch_decode = getattr(self.processor, "batch_decode", None)
-            if not callable(batch_decode):
-                raise GenerationTraceError(
-                    "decode_text=True requires a processor with batch_decode()"
-                )
-            decoded = batch_decode(
-                sequences[:, prompt_length:],
-                skip_special_tokens=True,
-            )
-            texts = (decoded,) if isinstance(decoded, str) else tuple(decoded)
-
-        return GenerationTrace(
-            prompt_length=prompt_length,
-            sequences=sequences,
-            steps=tuple(steps),
-            finish_reasons=finish_reasons,
-            texts=texts,
         )
 
     def __repr__(self) -> str:
         return f"VLM(model_id={self.model_id!r}, model_path={self.model_path!r})"
+
+
+__all__ = ["VLM"]

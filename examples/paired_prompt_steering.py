@@ -14,13 +14,12 @@ from pathlib import Path
 import torch
 from PIL import Image, ImageDraw
 
-from vlmbox import (
-    VLM,
+from vlmbox import VLM, set_seed
+from vlmbox.utils import (
     cosine_similarity,
     mean_difference,
     normalize_direction,
     projection_length,
-    set_seed,
 )
 
 
@@ -88,15 +87,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     )
     layer = len(vlm.adapter.layers) // 2 if args.layer is None else args.layer
     if not 0 <= layer < len(vlm.adapter.layers):
-        raise ValueError(
-            f"layer must be in [0, {len(vlm.adapter.layers)}); received {layer}"
-        )
+        raise ValueError(f"layer must be in [0, {len(vlm.adapter.layers)}); received {layer}")
 
     positive_state = _capture_last(vlm, image, args.positive_prompt, layer)
     negative_state = _capture_last(vlm, image, args.negative_prompt, layer)
-    direction = normalize_direction(
-        mean_difference(positive_state, negative_state, dim=0)
-    )
+    direction = normalize_direction(mean_difference(positive_state, negative_state, dim=0))
 
     task_inputs = vlm.prepare(_message(image, args.task_prompt))
     with torch.inference_mode():
@@ -118,9 +113,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     scope=args.scope,
                 ):
                     with vlm.capture("block", layers=layer, positions="last") as edited:
-                        steered_text = _generate_text(
-                            vlm, task_inputs, args.max_new_tokens
-                        )
+                        steered_text = _generate_text(vlm, task_inputs, args.max_new_tokens)
 
             delta = (edited[layer] - original[layer]).float()
             delta_norm = torch.linalg.vector_norm(delta, dim=-1)

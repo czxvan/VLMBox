@@ -25,76 +25,74 @@ pytestmark = [
 ]
 
 
-def _conversation(image: Image.Image) -> list[dict]:
-    return [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": image},
-                {"type": "text", "text": "Describe this image briefly."},
-            ],
-        }
-    ]
-
-
 @pytest.mark.parametrize("model_id", MODEL_IDS)
-def test_generate_trace_selects_native_decoder_layers(model_id: str) -> None:
+def test_trace_and_capture_use_the_same_zero_based_raw_decoder_blocks(model_id: str) -> None:
     vlm = VLM.from_pretrained(model_id, local_files_only=True)
+    handles = []
     try:
         assert vlm.input_device.type == "cuda"
-        layer_count = len(vlm.adapter.layers)
-        selected_layers = tuple(sorted({0, layer_count // 2, layer_count - 1}))
-        inputs = vlm.prepare(_conversation(Image.new("RGB", (224, 224), "white")))
+        count = len(vlm.adapter.layers)
+        selected = tuple(sorted({0, count // 2, count - 1}))
+        observed = {layer: [] for layer in selected}
 
+        def observer(layer):
+            def hook(_module, _args, output):
+                state = output if isinstance(output, torch.Tensor) else output[0]
+                observed[layer].append(state.detach().clone())
+
+            return hook
+
+        for layer in selected:
+            handles.append(vlm.adapter.layer(layer).register_forward_hook(observer(layer)))
+        hook_counts = [len(layer._forward_hooks) for layer in vlm.adapter.layers]
+        inputs = vlm.prepare(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": Image.new("RGB", (224, 224), "white")},
+                        {"type": "text", "text": "Describe this image briefly."},
+                    ],
+                }
+            ]
+        )
         original_generate = vlm.generate
-        recorded: dict[str, object] = {}
+        recorded = {}
 
-        def record_generate(generation_inputs, **generation_kwargs):
-            recorded["output_hidden_states_arg"] = generation_kwargs["output_hidden_states"]
-            output = original_generate(generation_inputs, **generation_kwargs)
-            recorded["output"] = output
-            return output
+        def record_generate(generation_inputs, **kwargs):
+            recorded["output_hidden_states"] = kwargs["output_hidden_states"]
+            return original_generate(generation_inputs, **kwargs)
 
         vlm.generate = record_generate
-        trace = vlm.generate_trace(
-            inputs,
-            capture_hidden_states=True,
-            hidden_state_layers=selected_layers,
-            decode_text=True,
-            max_new_tokens=4,
-            do_sample=False,
-        )
-
-        assert recorded["output_hidden_states_arg"] == selected_layers
-        output = recorded["output"]
-        raw_steps = output.hidden_states
-        assert len(raw_steps) == len(trace.steps) > 0
+        with vlm.capture("block", layers=selected, positions="all") as prefill:
+            trace = vlm.generate_trace(
+                inputs,
+                capture_hidden_states=True,
+                hidden_state_layers=selected,
+                decode_text=True,
+                max_new_tokens=4,
+                do_sample=False,
+            )
+        assert recorded["output_hidden_states"] is False
+        assert len(trace.steps) > 0
         assert trace.texts is not None and len(trace.texts) == 1
-        assert trace.steps[0].phase == "prefill"
-        assert all(step.phase == "decode" for step in trace.steps[1:])
-
-        for raw_step, trace_step in zip(raw_steps, trace.steps, strict=True):
-            assert len(raw_step) in (layer_count, layer_count + 1)
-            embedding_offset = len(raw_step) - layer_count
-            assert set(trace_step.hidden_states) == set(selected_layers)
-            for layer_index in range(layer_count):
-                state = raw_step[layer_index + embedding_offset]
-                if layer_index in selected_layers:
-                    assert isinstance(state, torch.Tensor)
-                    assert torch.equal(trace_step.hidden_states[layer_index], state)
-                else:
-                    assert state is None, (
-                        f"{model_id} retained unselected decoder layer {layer_index}; "
-                        "native selective output capture was not applied"
-                    )
-
-        prefill_length = trace.steps[0].hidden_states[selected_layers[0]].shape[1]
-        assert prefill_length == inputs["input_ids"].shape[1]
-        assert all(
-            step.hidden_states[selected_layers[0]].shape[1] == 1
-            for step in trace.steps[1:]
-        )
+        for index, step in enumerate(trace.steps):
+            assert step.phase == ("prefill" if index == 0 else "decode")
+            assert set(step.hidden_states) == set(selected)
+            for layer in selected:
+                torch.testing.assert_close(
+                    step.hidden_states[layer], observed[layer][index], rtol=0, atol=0
+                )
+                expected_length = inputs["input_ids"].shape[1] if index == 0 else 1
+                assert step.hidden_states[layer].shape[1] == expected_length
+        for layer in selected:
+            torch.testing.assert_close(
+                trace.steps[0].hidden_states[layer], prefill[layer], rtol=0, atol=0
+            )
+        assert [len(layer._forward_hooks) for layer in vlm.adapter.layers] == hook_counts
     finally:
+        for handle in handles:
+            handle.remove()
         del vlm
         gc.collect()
         torch.cuda.empty_cache()

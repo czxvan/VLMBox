@@ -1,52 +1,92 @@
 # Architecture
 
-VLMBox is a thin research layer over PyTorch and Hugging Face Transformers. Transformers remains responsible for model execution, chat templates, image processing, and autoregressive generation. VLMBox adds reusable interfaces for inspecting and manipulating model internals.
+VLMBox supplies shared model operations for controlled VLM experiments: prepare inputs, inspect decoder states, intervene on activations, trace generation, and optimize visual interventions. VLMBox owns model-layout adaptation and decoder-layer semantics. Experiment code owns datasets, messages, losses, token masks, metrics, and reporting.
 
-## Model loading and execution
+The public package root exports `VLM`, `Renderer`, and `set_seed`. Optional training lives in `vlmbox.trainer`, numerical helpers in `vlmbox.utils`, and trace result types in `vlmbox.generation`. Native model/processor access is an advanced escape hatch. Daily research adapters should use the shared operations; recurring native workarounds indicate a missing shared operation.
 
-`VLM.from_pretrained()` accepts a ModelScope model ID and performs the following steps:
+## Files and their responsibilities
 
-1. Resolve the checkpoint with ModelScope's `snapshot_download()`.
-2. Load the native processor with `AutoProcessor`.
-3. Load the model with `AutoModelForMultimodalLM`.
-4. Construct a `TransformersAdapter` for accessing common decoder components.
-5. Expose preparation, forward, generation, capture, and intervention methods through `VLM`.
+```text
+vlmbox/
+├── __init__.py
+├── model.py
+├── adapter.py
+├── activation.py
+├── generation.py
+├── trainer.py
+├── utils.py
+└── renderer/
+    ├── __init__.py
+    ├── renderer.py
+    ├── layout.py
+    └── intervention.py
+```
 
-The current loader uses `dtype="auto"`, `device_map="auto"`, and `trust_remote_code=True`. It intentionally does not expose a collection of model-loading overrides. Only load model repositories whose remote code you trust.
-
-## Package modules
-
-| Module | Responsibility |
+| File | Responsibility and reason to exist separately |
 |---|---|
-| `vlmbox.model` | Model loading, input preparation, forward/generation, activation access, and generation traces |
-| `vlmbox.adapter` | Resolves common language-decoder layouts in Transformers models |
-| `vlmbox.activation` | Context-managed activation capture and intervention hooks |
-| `vlmbox.representation` | Tensor operations for direction extraction, projection, and similarity |
-| `vlmbox.image` | PIL image conversion, resizing, cropping, and patch placement |
-| `vlmbox.render` | Fixed-size-font dynamic-height instruction bands, native-host image composition, layout metadata, and differentiable tensor concatenation |
-| `vlmbox.image_render` | YAML validation and orchestration of instruction rendering, host preservation, intervention, and composition |
-| `vlmbox.training.image` | Universal perturbation and patch parameterizations |
-| `vlmbox.training.trainer` | Optimization loop for universal image parameters |
-| `vlmbox.generation` | Architecture-independent generation trace data structures |
-| `vlmbox.repro` | Random seeding and optional deterministic PyTorch settings |
+| `model.py` | The `VLM` entry point: checkpoint loading, native input preparation, device transfer, and delegation to research operations |
+| `adapter.py` | Maps supported native model layouts to zero-based decoder blocks, attention, and MLP; isolates architecture-specific paths |
+| `activation.py` | Owns hook installation/removal, token selection, capture, and intervention; shared by single-forward capture and generation traces |
+| `generation.py` | Owns trace data, per-forward alignment, logits, decoding, and finish-reason inference; avoids mixing generation-result adaptation into model loading |
+| `trainer.py` | Coordinates frozen-model image optimization and state restoration; rendering remains usable independently |
+| `utils.py` | Small shared numerical and reproducibility operations with explicit precision and gradient behavior |
+| `renderer/renderer.py` | Public `Renderer`: YAML loading, rendering orchestration, bounded caching, metadata, and intervention weight persistence |
+| `renderer/layout.py` | Internal PIL RGB conversion, typography, image/Tensor composition, and layout metadata; has no model or optimizer dependency |
+| `renderer/intervention.py` | One `Intervention` module for patch/delta parameters, projection bounds, and host-relative geometry; has no typography or model dependency |
+| `__init__.py` files | Define the small public import surfaces; contain no implementation logic |
 
-## Decoder adapter boundary
+Each implementation file isolates an operation with its own invariants and validation. The root contains no private helper modules. Rendering implementation details are grouped by responsibility in the rendering package; only `Renderer` is its supported public interface.
 
-`TransformersAdapter` exposes decoder layers, attention modules, MLP modules, final normalization, and the language-model head through a small protocol. It recognizes a bounded set of common Transformers module paths. It deliberately avoids recursively searching the entire multimodal model, which could select a vision encoder instead of the language decoder.
+Module names use nouns for components (`model`, `adapter`, `renderer`, `trainer`), domain data/operations (`activation`, `generation`, `layout`, `intervention`), or shared utilities (`utils`). `trainer.py` names the concrete optimizer component; `Trainer` optimizes rendered intervention parameters against a frozen VLM; `Sample` is its input record and `TrainStep` its scalar output record. The callable `LossFunction` protocol defines a single-forward loss contract; `Trainer` accepts it as `loss_function`, while `TrainStep.loss` records the scalar value.
 
-If a model uses an unsupported decoder layout, adapter construction fails rather than guessing. Extending support should add a well-grounded layout to the adapter and corresponding tests; model-specific behavior should not leak into unrelated core modules.
+## Rendering dependencies
 
-## Activation operations
+```mermaid
+flowchart TD
+    Trainer[Trainer] --> VLM[VLM]
+    Trainer --> Renderer[Renderer]
+    Renderer --> Layout[layout: typography and composition]
+    Renderer --> Intervention[intervention: weights and geometry]
+    VLM --> Adapter[adapter: native decoder layout]
+    VLM --> Generation[generation: traces]
+    VLM --> Activation[activation: hooks]
+    Generation --> Activation
+    Activation --> Utils[utils: numerical operations]
+```
 
-`VLM.capture()` and `VLM.intervene()` install temporary forward hooks and return context managers. Hooks are removed when the context exits, including when an exception occurs.
+The former `image_render.py` orchestrator and three root private modules are consolidated into three rendering implementations. RGB conversion joins layout; bounding-box geometry joins interventions. The separate `_image.py` helper module is removed. `ImageRenderer` is renamed to `Renderer` because the rendering package already supplies the image context. Existing YAML and checkpoint formats are retained.
 
-- Components: `block`, `attention`, or `mlp`.
-- Token positions: `all`, `last`, or explicit sequence indices.
-- Interventions: `add`, `replace`, `project_out`, or `zero`.
-- Scope: `first_forward` or `every_forward`.
+The renderer accepts native-size PIL host images and returns PIL images. Typography, the host-local intervention, and final canvas coordinates remain distinct. Calling `renderer(host, instruction)` returns a differentiable CHW Tensor; `.render(...)` returns PIL. As an `nn.Module`, the renderer supplies standard `.parameters()` and `.to()` operations. Both `Trainer` and custom research loops use this interface and call `.project_()` after updates. Learned weights are stored separately from YAML initialization, with type/geometry/bounds validation and parameter hashes.
 
-`first_forward` edits each selected module only on its first invocation. `every_forward` reapplies the edit on each invocation, including autoregressive decode steps.
+## Canonical decoder-layer contract
 
-## Design boundaries
+Every VLMBox layer parameter is a zero-based decoder block index. `0` selects the first block; attention and MLP operations use their containing block's index. Block states are direct module outputs before any separate final model normalization. `capture()` and `generate_trace()` use the same block meaning, including the last block. Embeddings and final-normalized outputs are distinct quantities, not extra decoder indices.
 
-VLMBox focuses on model-facing research primitives. It does not provide dataset catalogs, experiment tracking, benchmark orchestration, evaluation services, or a replacement image-processing implementation. Native Transformers processors remain the source of truth for model-specific preprocessing.
+Generation traces use temporary hooks only on selected blocks and disable native hidden-state output. This avoids architecture-specific embedding offsets, native tuple layouts, and last-layer normalization differences. The first trace step equals full-token block capture from the same generation. The backend still owns generation and its cache; VLMBox aligns captured forwards to predicted tokens and rejects unalignable schedules. All hooks are removed on success and failure.
+
+Legacy projects convert old stored layer numbers once at migration boundaries. New project APIs use the library contract directly. See [research adapters and migration](research-adapters.md).
+
+## Model execution and validation
+
+`VLM.from_pretrained()` resolves a ModelScope checkpoint and loads native Transformers objects. `VLM(model, processor, adapter=...)` supports optional custom loading while preserving model state. Both preparation paths share chat-template controls. Differentiable preparation validates Tensor images, uses native CPU image preprocessing without detaching, and transfers prepared inputs to the model device.
+
+`Trainer.fit()` freezes model parameters, renders each batch, applies the caller's scalar loss, updates only intervention parameters, and projects their bounds. Model parameter flags and every submodule's original training mode are restored even on failure.
+
+CPU tests cover numerical behavior, layer semantics before final normalization, capture/trace equivalence, hook cleanup, typography, parameter persistence, and training restoration. GPU tests validate the same operations on cached Qwen2.5-VL, InternVL, and SmolVLM models. Experiment-specific scientific outcomes remain separately evaluated by research code.
+
+
+## Code boundaries and cleanup
+
+Keep complete, single-use steps near their caller. Extract an ordinary named function only when it represents a reusable operation or a substantial independent algorithm. Shared helpers use domain names such as `layer_indices`, `activation_tensor`, and `anchored_bbox`. The supported API is the documented interface and each module's `__all__`; helper names do not enlarge the package-root exports. There are no underscore-prefixed helper functions or methods, apart from Python's special methods. Private state such as hook stacks and typography caches remains an implementation detail.
+
+Decoder resolution now uses standard attribute traversal rather than a chain of path, candidate, sequence, and component wrappers. Hook ownership uses `ExitStack` so partial installation and model failures always release hooks. Trace capture stays beside generation; shared activation selection and tensor extraction stay in `activation.py`. Patch and local-additive rendering share one parameter implementation and preserve standard PyTorch `forward`/`apply` behavior. Layout metadata describes layout only; intervention provenance is added by the renderer. Weight checkpoint format and YAML schema remain unchanged.
+
+The remaining numerical helpers are used by activation projection or the paired-prompt example, including projection-length and cosine measurements. Public result accessors are retained for callers even when library internals do not use them. Local reference counts alone are not grounds for deleting supported research operations.
+
+## Next refinements
+
+1. **Validate research adapters against real objectives.** LoopPatch's existing adapter tests cover its current use. Next, exercise HijackPatch's actual loss with differentiable preparation and canonical block captures in a small adapter before migrating training scripts. Keep experiment-specific token masks, reference states, and multi-forward losses in the research repository. Add shared operations only for demonstrated duplication across adapters.
+2. **Reduce configuration choices.** A future schema can remove fixed `host.preserve_original_size` and `host.color_space` switches because native size and RGB are protocol invariants. Keep the present schema readable until a deliberate migration; avoid aliases and a general configuration framework. Clarify whether `Sample.image_instruction` should be required at construction since the current trainer always requires it.
+3. **Profile the preparation boundary.** Measure CPU image conversion, native processor work, host-to-device transfers, and model forward separately on representative research batches. Optimize demonstrated costs while preserving native pixel outputs and gradients. Cache reusable typography, never tensors retaining a previous step's autograd graph.
+
+Keep the current directory boundaries. No backend registry, trainer callback framework, or additional facade is justified by the present adapters. The next architectural evidence should come from smaller research adapters and reproducible timing measurements.

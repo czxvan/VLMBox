@@ -9,7 +9,8 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
-from vlmbox import VLM, ImageRenderer, ImageSample, ImageTrainer
+from vlmbox import VLM, Renderer, set_seed
+from vlmbox.trainer import LossFunction, Sample, Trainer
 
 DEFAULT_MODEL = "HuggingFaceTB/SmolVLM-500M-Instruct"
 DEFAULT_PROMPT = "Describe the image in one short sentence."
@@ -46,7 +47,7 @@ def _load_samples(
     image_instruction: str,
     target: str,
     limit: int,
-) -> list[ImageSample]:
+) -> list[Sample]:
     extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
     paths = sorted(path for path in image_dir.iterdir() if path.suffix.lower() in extensions)
     if limit:
@@ -59,7 +60,7 @@ def _load_samples(
         with Image.open(path) as source:
             image = source.convert("RGB")
         samples.append(
-            ImageSample(
+            Sample(
                 image=image,
                 prompt=prompt,
                 target=target,
@@ -71,8 +72,8 @@ def _load_samples(
 
 def _target_token_spans(
     vlm: VLM,
-    renderer: ImageRenderer,
-    samples: list[ImageSample],
+    renderer: Renderer,
+    samples: list[Sample],
 ) -> dict[int, tuple[int, int]]:
     """Return each sample's (unpadded prompt length, assistant target length)."""
     spans = {}
@@ -103,8 +104,8 @@ def _target_token_spans(
     return spans
 
 
-def _target_sequence_objective(target_spans: dict[int, tuple[int, int]]):
-    def objective(outputs, inputs, samples) -> torch.Tensor:
+def _target_sequence_loss(target_spans: dict[int, tuple[int, int]]) -> LossFunction:
+    def loss(outputs, inputs, samples) -> torch.Tensor:
         input_ids = inputs["input_ids"]
         attention_mask = inputs["attention_mask"]
         total_loss = outputs.logits.new_zeros((), dtype=torch.float32)
@@ -129,7 +130,7 @@ def _target_sequence_objective(target_spans: dict[int, tuple[int, int]]):
             raise RuntimeError("assistant target batch contains no valid tokens")
         return total_loss / total_tokens
 
-    return objective
+    return loss
 
 
 def parse_args() -> argparse.Namespace:
@@ -152,7 +153,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=32)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=2026)
-    parser.add_argument("--output", type=Path, default=Path("image_renderer_result.png"))
+    parser.add_argument("--output", type=Path, default=Path("rendered.png"))
+    parser.add_argument("--intervention", type=Path, help="Start from saved intervention weights.")
     parser.add_argument("--local-files-only", action="store_true")
     return parser.parse_args()
 
@@ -166,7 +168,7 @@ def main() -> None:
     if not args.render_config.is_file():
         raise FileNotFoundError(args.render_config)
 
-    torch.manual_seed(args.seed)
+    set_seed(args.seed)
     samples = _load_samples(
         args.image_dir,
         prompt=args.prompt,
@@ -178,17 +180,19 @@ def main() -> None:
     vlm.model.eval()
     print(f"Model device: {vlm.input_device}; samples: {len(samples)}")
 
-    renderer = ImageRenderer.from_yaml(args.render_config)
+    renderer = Renderer.from_yaml(args.render_config)
+    if args.intervention is not None:
+        renderer.load_intervention(args.intervention)
     target_spans = _target_token_spans(vlm, renderer, samples)
     print(
         "Teacher-forced assistant target spans: "
         + ", ".join(str(span[1]) for span in target_spans.values())
         + " tokens"
     )
-    trainer = ImageTrainer(
+    trainer = Trainer(
         vlm,
         renderer,
-        _target_sequence_objective(target_spans),
+        loss_function=_target_sequence_loss(target_spans),
         learning_rate=args.learning_rate,
     )
     history = trainer.fit(
@@ -205,6 +209,8 @@ def main() -> None:
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     preview.save(args.output)
+    intervention_path = args.output.with_suffix(".pt")
+    renderer.save_intervention(intervention_path)
     metadata_path = args.output.with_suffix(".json")
     metadata_path.write_text(
         json.dumps(
@@ -216,6 +222,7 @@ def main() -> None:
                 "learning_rate": args.learning_rate,
                 "seed": args.seed,
                 "training": [asdict(step) for step in history],
+                "intervention": intervention_path.name,
                 "render": metadata,
             },
             indent=2,
@@ -229,6 +236,7 @@ def main() -> None:
         f"gradient_norm={history[-1].gradient_norm:.6f}"
     )
     print(f"Saved rendered preview to {args.output}")
+    print(f"Saved intervention weights to {intervention_path}")
     print(f"Saved run metadata to {metadata_path}")
 
 

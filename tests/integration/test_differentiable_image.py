@@ -9,7 +9,8 @@ import torch
 import torch.nn.functional as F
 from PIL import Image, ImageFont
 
-from vlmbox import VLM, ImageRenderer, ImageSample, ImageTrainer
+from vlmbox import VLM, Renderer
+from vlmbox.trainer import Sample, Trainer
 
 MODEL_IDS = (
     "Qwen/Qwen2.5-VL-3B-Instruct",
@@ -47,15 +48,23 @@ def _conversation(
     return messages
 
 
-def _assert_native_processor_parity(vlm: VLM, image: torch.Tensor) -> None:
-    actual = vlm.prepare_differentiable(_conversation(image))
+def _assert_native_processor_parity(
+    vlm: VLM, image: torch.Tensor, *, prefix: str | None = None
+) -> None:
+    options = {"continue_final_message": True} if prefix is not None else {}
+    actual = vlm.prepare_differentiable(
+        _conversation(image, target=prefix),
+        add_generation_prompt=prefix is None,
+        chat_template_kwargs=options,
+    )
     expected = vlm.processor.apply_chat_template(
-        _conversation(image.detach().clone()),
+        _conversation(image.detach().clone(), target=prefix),
         tokenize=True,
-        add_generation_prompt=True,
+        add_generation_prompt=prefix is None,
         return_dict=True,
         return_tensors="pt",
         processor_kwargs={"padding": True, "do_rescale": False},
+        **options,
     )
 
     expected_keys = {key for key, value in expected.items() if isinstance(value, torch.Tensor)}
@@ -88,8 +97,8 @@ def _assert_left_padding(inputs) -> None:
 
 def _target_token_spans(
     vlm: VLM,
-    renderer: ImageRenderer,
-    samples: list[ImageSample],
+    renderer: Renderer,
+    samples: list[Sample],
 ) -> dict[int, tuple[int, int]]:
     spans = {}
     for sample in samples:
@@ -108,8 +117,8 @@ def _target_token_spans(
     return spans
 
 
-def _target_ce_objective(target_spans: dict[int, tuple[int, int]]):
-    def objective(outputs, inputs, samples) -> torch.Tensor:
+def _target_ce_loss(target_spans: dict[int, tuple[int, int]]):
+    def loss(outputs, inputs, samples) -> torch.Tensor:
         total_loss = outputs.logits.new_zeros((), dtype=torch.float32)
         total_tokens = 0
         for index, sample in enumerate(samples):
@@ -128,7 +137,7 @@ def _target_ce_objective(target_spans: dict[int, tuple[int, int]]):
         assert total_tokens > 0
         return total_loss / total_tokens
 
-    return objective
+    return loss
 
 
 def _write_renderer_config(path: Path, intervention_type: str) -> Path:
@@ -221,6 +230,10 @@ def test_native_processor_parity_and_universal_training_gradients(
         del image
         gc.collect()
 
+    prefix_image = torch.rand(3, 224, 224, requires_grad=True)
+    _assert_native_processor_parity(vlm, prefix_image, prefix="The image shows")
+    del prefix_image
+
     image = torch.rand(3, 224, 224, dtype=torch.float32, requires_grad=True)
     inputs = vlm.prepare_differentiable(_conversation(image))
     outputs = vlm.forward(inputs, use_cache=False)
@@ -236,7 +249,7 @@ def test_native_processor_parity_and_universal_training_gradients(
     torch.cuda.empty_cache()
 
     samples = [
-        ImageSample(
+        Sample(
             image=Image.fromarray(
                 torch.rand(height, width, 3).mul(255).to(torch.uint8).cpu().numpy()
             ),
@@ -247,17 +260,17 @@ def test_native_processor_parity_and_universal_training_gradients(
         for height, width in ((224, 224), (192, 320))
     ]
     for intervention_type in ("local_additive", "overlay_patch"):
-        renderer = ImageRenderer.from_yaml(
+        renderer = Renderer.from_yaml(
             _write_renderer_config(tmp_path / f"{intervention_type}.yaml", intervention_type)
         )
         target_spans = _target_token_spans(vlm, renderer, samples)
-        parameter = renderer._trainable_parameters()[0]
+        parameter = next(renderer.parameters())
         assert parameter.device.type == "cpu"
         before = parameter.detach().clone()
-        trainer = ImageTrainer(
+        trainer = Trainer(
             vlm,
             renderer,
-            _target_ce_objective(target_spans),
+            loss_function=_target_ce_loss(target_spans),
             learning_rate=1e-3,
         )
         history = trainer.fit(samples, max_steps=1, batch_size=2, shuffle=False)

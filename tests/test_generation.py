@@ -6,7 +6,6 @@ import pytest
 import torch
 from torch import nn
 
-import vlmbox
 from vlmbox.adapter import TransformersAdapter
 from vlmbox.generation import (
     GenerationStep,
@@ -16,15 +15,10 @@ from vlmbox.generation import (
 from vlmbox.model import VLM
 
 
-def test_generation_types_are_exported_from_package_root() -> None:
-    assert vlmbox.GenerationStep is GenerationStep
-    assert vlmbox.GenerationTrace is GenerationTrace
-    assert vlmbox.GenerationTraceError is GenerationTraceError
-
-
 class FakeModel(nn.Module):
     def __init__(self) -> None:
         super().__init__()
+        self.anchor = nn.Parameter(torch.zeros(()))
         self.language_model = nn.Module()
         self.language_model.layers = nn.ModuleList([nn.Identity(), nn.Identity()])
         self.generation_config = SimpleNamespace(
@@ -38,6 +32,9 @@ class FakeModel(nn.Module):
 
     def generate(self, **kwargs):
         self.generation_kwargs = kwargs
+        for step in getattr(self.output, "block_outputs", ()):
+            for layer, state in zip(self.language_model.layers, step, strict=False):
+                layer(state)
         return self.output
 
 
@@ -74,6 +71,7 @@ def make_output(sequences: torch.Tensor | None = None):
         sequences=sequences,
         logits=logits,
         hidden_states=(prefill, decode),
+        block_outputs=(prefill[1:], decode[1:]),
     )
 
 
@@ -93,7 +91,7 @@ def test_generate_trace_captures_selected_layers_and_raw_logits() -> None:
 
     assert model.generation_kwargs["return_dict_in_generate"] is True
     assert model.generation_kwargs["output_logits"] is True
-    assert model.generation_kwargs["output_hidden_states"] == (1,)
+    assert model.generation_kwargs["output_hidden_states"] is False
     assert model.generation_kwargs["max_new_tokens"] == 2
     assert torch.equal(trace.prompt_token_ids, inputs["input_ids"])
     assert torch.equal(trace.generated_token_ids, torch.tensor([[2, 0], [4, 5]]))
@@ -111,7 +109,56 @@ def test_generate_trace_captures_selected_layers_and_raw_logits() -> None:
     assert trace.steps[1].hidden_states[1].shape == (2, 1, 4)
 
 
-def test_generate_trace_uses_transformers_native_selected_layer_capture() -> None:
+def _assert_canonical_trace(vlm: VLM, final_norm: nn.Module, *, max_new_tokens: int) -> None:
+    selected = (0, len(vlm.adapter.layers) - 1)
+    observed = {layer: [] for layer in selected}
+    normalized = []
+    handles = []
+
+    def observer(layer):
+        def hook(_module, _args, output):
+            state = output if isinstance(output, torch.Tensor) else output[0]
+            observed[layer].append(state.detach().clone())
+
+        return hook
+
+    for layer in selected:
+        handles.append(vlm.adapter.layer(layer).register_forward_hook(observer(layer)))
+    handles.append(
+        final_norm.register_forward_hook(
+            lambda _m, _i, output: normalized.append(output.detach().clone())
+        )
+    )
+    before = [len(layer._forward_hooks) for layer in vlm.adapter.layers]
+    try:
+        inputs = {"input_ids": torch.tensor([[1, 5, 6]])}
+        with vlm.capture("block", layers=selected, positions="all") as prefill:
+            trace = vlm.generate_trace(
+                inputs,
+                capture_hidden_states=True,
+                hidden_state_layers=selected,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+            )
+        assert len(trace.steps) > 0
+        for index, step in enumerate(trace.steps):
+            assert set(step.hidden_states) == set(selected)
+            for layer in selected:
+                torch.testing.assert_close(
+                    step.hidden_states[layer], observed[layer][index], rtol=0, atol=0
+                )
+        for layer in selected:
+            torch.testing.assert_close(
+                trace.steps[0].hidden_states[layer], prefill[layer], rtol=0, atol=0
+            )
+        assert not torch.allclose(trace.steps[0].hidden_states[selected[-1]], normalized[0])
+        assert [len(layer._forward_hooks) for layer in vlm.adapter.layers] == before
+    finally:
+        for handle in handles:
+            handle.remove()
+
+
+def test_generate_trace_uses_raw_blocks_before_llama_final_norm() -> None:
     from transformers import LlamaConfig, LlamaForCausalLM
 
     config = LlamaConfig(
@@ -136,40 +183,10 @@ def test_generate_trace_uses_transformers_native_selected_layer_capture() -> Non
         adapter=TransformersAdapter(model),
     )
 
-    original_generate = model.generate
-    recorded = {}
-
-    def record_generate(**kwargs):
-        recorded["output_hidden_states"] = kwargs["output_hidden_states"]
-        output = original_generate(**kwargs)
-        recorded["output"] = output
-        return output
-
-    model.generate = record_generate
-    inputs = {"input_ids": torch.tensor([[1, 5, 6]])}
-    trace = vlm.generate_trace(
-        inputs,
-        capture_hidden_states=True,
-        hidden_state_layers=[1, 3],
-        max_new_tokens=3,
-        do_sample=False,
-    )
-
-    assert recorded["output_hidden_states"] == (1, 3)
-    raw_steps = recorded["output"].hidden_states
-    assert len(raw_steps) == len(trace.steps) == 3
-    for raw_step, trace_step in zip(raw_steps, trace.steps, strict=True):
-        assert len(raw_step) == len(model.model.layers)
-        assert raw_step[0] is None
-        assert raw_step[2] is None
-        assert isinstance(raw_step[1], torch.Tensor)
-        assert isinstance(raw_step[3], torch.Tensor)
-        assert torch.equal(trace_step.hidden_states[1], raw_step[1])
-        assert torch.equal(trace_step.hidden_states[3], raw_step[3])
-        assert set(trace_step.hidden_states) == {1, 3}
+    _assert_canonical_trace(vlm, model.model.norm, max_new_tokens=3)
 
 
-def test_generate_trace_uses_native_selection_in_qwen25_vl() -> None:
+def test_generate_trace_uses_raw_blocks_before_qwen_final_norm() -> None:
     from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
         Qwen2_5_VLConfig,
         Qwen2_5_VLTextConfig,
@@ -214,36 +231,7 @@ def test_generate_trace_uses_native_selection_in_qwen25_vl() -> None:
         adapter=TransformersAdapter(model),
     )
 
-    original_generate = model.generate
-    recorded = {}
-
-    def record_generate(**kwargs):
-        recorded["output_hidden_states"] = kwargs["output_hidden_states"]
-        output = original_generate(**kwargs)
-        recorded["output"] = output
-        return output
-
-    model.generate = record_generate
-    trace = vlm.generate_trace(
-        {"input_ids": torch.tensor([[1, 5, 6]])},
-        capture_hidden_states=True,
-        hidden_state_layers=[1, 3],
-        max_new_tokens=2,
-        do_sample=False,
-    )
-
-    assert recorded["output_hidden_states"] == (1, 3)
-    raw_steps = recorded["output"].hidden_states
-    assert len(raw_steps) == len(trace.steps)
-    for raw_step, trace_step in zip(raw_steps, trace.steps, strict=True):
-        assert len(raw_step) == len(vlm.adapter.layers) == 4
-        assert raw_step[0] is None
-        assert raw_step[2] is None
-        assert isinstance(raw_step[1], torch.Tensor)
-        assert isinstance(raw_step[3], torch.Tensor)
-        assert torch.equal(trace_step.hidden_states[1], raw_step[1])
-        assert torch.equal(trace_step.hidden_states[3], raw_step[3])
-        assert set(trace_step.hidden_states) == {1, 3}
+    _assert_canonical_trace(vlm, model.model.language_model.norm, max_new_tokens=2)
 
 
 def test_generate_trace_disables_internal_capture_by_default() -> None:
@@ -271,9 +259,38 @@ def test_generate_trace_captures_all_layers_when_explicitly_selected() -> None:
     assert set(trace.steps[0].hidden_states) == {0, 1}
 
 
-def test_generate_trace_supports_hidden_states_without_embedding_entry() -> None:
+def test_trace_records_block_outputs_after_an_active_intervention() -> None:
+    vlm, _model = make_vlm(make_output())
+    with vlm.intervene("block", 1, "zero", positions="all"):
+        trace = vlm.generate_trace(
+            {"input_ids": torch.tensor([[10, 11], [20, 21]])},
+            capture_hidden_states=True,
+            hidden_state_layers=[1],
+        )
+    assert all(torch.count_nonzero(step.hidden_states[1]) == 0 for step in trace.steps)
+
+
+def test_trace_removes_capture_hooks_when_generation_fails() -> None:
+    vlm, model = make_vlm(make_output())
+    before = [len(layer._forward_hooks) for layer in vlm.adapter.layers]
+
+    def fail(**_kwargs):
+        model.language_model.layers[0](torch.ones(2, 2, 4))
+        raise RuntimeError("generation failed")
+
+    model.generate = fail
+    with pytest.raises(RuntimeError, match="generation failed"):
+        vlm.generate_trace(
+            {"input_ids": torch.tensor([[10, 11], [20, 21]])},
+            capture_hidden_states=True,
+            hidden_state_layers=[0, 1],
+        )
+    assert [len(layer._forward_hooks) for layer in vlm.adapter.layers] == before
+
+
+def test_generate_trace_ignores_native_hidden_state_layout() -> None:
     output = make_output()
-    output.hidden_states = tuple(step[1:] for step in output.hidden_states)
+    output.hidden_states = ((None,),)
     vlm, _model = make_vlm(output)
 
     trace = vlm.generate_trace(
@@ -282,7 +299,7 @@ def test_generate_trace_supports_hidden_states_without_embedding_entry() -> None
         hidden_state_layers=0,
     )
 
-    assert torch.equal(trace.steps[0].hidden_states[0], output.hidden_states[0][0])
+    assert torch.equal(trace.steps[0].hidden_states[0], output.block_outputs[0][0])
 
 
 def test_max_new_tokens_takes_precedence_over_max_length_for_finish_reason() -> None:
@@ -416,10 +433,10 @@ def test_generate_trace_rejects_misaligned_logits_or_hidden_states() -> None:
         )
 
     output = make_output()
-    output.hidden_states = output.hidden_states[:1]
+    output.block_outputs = output.block_outputs[:1]
     vlm, _model = make_vlm(output)
 
-    with pytest.raises(GenerationTraceError, match="one hidden-state"):
+    with pytest.raises(GenerationTraceError, match="one block forward per token"):
         vlm.generate_trace(
             {"input_ids": torch.tensor([[10, 11], [20, 21]])},
             capture_hidden_states=True,
@@ -427,16 +444,16 @@ def test_generate_trace_rejects_misaligned_logits_or_hidden_states() -> None:
         )
 
 
-def test_generate_trace_rejects_unrecognized_hidden_state_layout() -> None:
+def test_generate_trace_rejects_missing_decoder_block_forwards() -> None:
     output = make_output()
-    output.hidden_states = tuple((step[0],) for step in output.hidden_states)
+    output.block_outputs = tuple((step[0],) for step in output.block_outputs)
     vlm, _model = make_vlm(output)
 
-    with pytest.raises(GenerationTraceError, match="expected 2 decoder layers"):
+    with pytest.raises(GenerationTraceError, match="decoder block 1"):
         vlm.generate_trace(
             {"input_ids": torch.tensor([[10, 11], [20, 21]])},
             capture_hidden_states=True,
-            hidden_state_layers=[0],
+            hidden_state_layers=[1],
         )
 
 

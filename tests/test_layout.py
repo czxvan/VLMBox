@@ -1,17 +1,18 @@
 from __future__ import annotations
 
+import math
+
 import pytest
 import torch
-from PIL import Image, ImageFont
+from PIL import Image, ImageDraw, ImageFont
 
-from vlmbox.image import anchored_bbox
-from vlmbox.render import (
+from vlmbox.renderer.intervention import Intervention, anchored_bbox
+from vlmbox.renderer.layout import (
     InstructionStyle,
     compose_instruction_image,
-    compose_instruction_tensor,
     render_instruction_band,
+    to_rgb,
 )
-from vlmbox.training.image import UniversalLocalPerturbation, UniversalPatch
 
 
 @pytest.fixture
@@ -36,7 +37,7 @@ def test_dynamic_band_preserves_host_dimensions_and_all_words(style: Instruction
     assert long.image.crop(long.host_bbox).tobytes() == host.tobytes()
     assert short.font_size == long.font_size == 20
     assert len(short.font_sha256) == 64
-    assert long.metadata()["renderer"] == "virp-1"
+    assert long.metadata()["renderer"] == "virp-2"
     assert "please" in " ".join(long.lines)
     assert "task" in " ".join(long.lines)
 
@@ -80,52 +81,81 @@ def test_geometry_is_host_relative_not_canvas_relative() -> None:
 
 
 def test_variable_size_universal_patch_preserves_gradient() -> None:
-    patch = UniversalPatch(None, (2, 3), position="bottom_right", init="zeros")
+    patch = Intervention("overlay_patch", (2, 3), anchor="bottom_right", init="zeros")
     with torch.no_grad():
-        patch.patch.fill_(0.75)
+        patch.parameter.fill_(0.75)
     for height, width in [(8, 9), (12, 6)]:
         original = torch.full((3, height, width), 0.2)
-        modified = patch.apply(original)
+        modified = patch(original)
         assert modified.shape == original.shape
         assert torch.all(modified[:, -2:, -3:] == 0.75)
         assert torch.all(modified[:, :-2, :] == 0.2)
         modified.sum().backward()
-    assert patch.patch.grad is not None
-    assert torch.count_nonzero(patch.patch.grad) > 0
+    assert patch.parameter.grad is not None
+    assert torch.count_nonzero(patch.parameter.grad) > 0
 
 
 def test_local_perturbation_is_shared_and_uses_same_support() -> None:
-    perturbation = UniversalLocalPerturbation((2, 3), epsilon=0.1, position="bottom_right")
+    perturbation = Intervention("local_additive", (2, 3), epsilon=0.1, anchor="bottom_right")
     with torch.no_grad():
-        perturbation.delta.fill_(0.05)
+        perturbation.parameter.fill_(0.05)
     for height, width in [(8, 9), (12, 6)]:
         original = torch.full((3, height, width), 0.25)
-        modified = perturbation.apply(original)
+        modified = perturbation(original)
         assert torch.allclose(modified[:, -2:, -3:], torch.full((3, 2, 3), 0.30))
         assert torch.equal(modified[:, :-2, :], original[:, :-2, :])
         modified.sum().backward()
-    assert perturbation.delta.grad is not None
+    assert perturbation.parameter.grad is not None
     with torch.no_grad():
-        perturbation.delta.fill_(0.5)
+        perturbation.parameter.fill_(0.5)
     perturbation.project_()
-    assert torch.allclose(perturbation.delta, torch.full_like(perturbation.delta, 0.1))
+    assert torch.allclose(perturbation.parameter, torch.full_like(perturbation.parameter, 0.1))
 
 
-def test_differentiable_host_patch_and_instruction_composition(style: InstructionStyle) -> None:
-    band = render_instruction_band("Do the task.", 80, style)
-    arr = __import__("numpy").asarray(band.image).copy()
-    band_tensor = torch.from_numpy(arr).permute(2, 0, 1).float() / 255
-    host = torch.full((3, 75, 80), 0.2)
-    patch = UniversalPatch(None, (16, 16), position="bottom_right")
-    attacked_host = patch.apply(host)
-    composed = compose_instruction_tensor(attacked_host, band_tensor)
-    assert tuple(composed.shape) == (3, 75 + band.image.height, 80)
-    assert torch.equal(composed[:, : band.image.height, :], band_tensor)
-    composed.square().sum().backward()
-    assert patch.patch.grad is not None
-    assert torch.count_nonzero(patch.patch.grad) > 0
+@pytest.mark.parametrize("font_name", ["DejaVuSans.ttf", "DejaVuSans-Oblique.ttf"])
+@pytest.mark.parametrize("alignment", ["left", "center", "right"])
+def test_zero_margin_text_preserves_all_glyph_pixels(font_name, alignment) -> None:
+    font = ImageFont.truetype(font_name, 20)
+    text = "jgypÁ"
+    reference = Image.new("RGB", (150, 100), "white")
+    ImageDraw.Draw(reference).text((20, 20), text, font=font, fill="black", anchor="lt")
+    ink = Image.eval(reference, lambda channel: 255 - channel)
+    expected = reference.crop(ink.getbbox())
+    width = max(font.getbbox(text)[2], font.getlength(text)) - min(0, font.getbbox(text)[0])
+    band = render_instruction_band(
+        text,
+        math.ceil(width),
+        InstructionStyle(font.path, 20, alignment=alignment),
+    )
+    assert band.lines == (text,)
+    ink = Image.eval(band.image, lambda channel: 255 - channel)
+    actual = band.image.crop(ink.getbbox())
+    assert actual.size == expected.size
+    assert actual.tobytes() == expected.tobytes()
 
 
-def test_tensor_composition_rejects_mismatched_width() -> None:
-    with pytest.raises(ValueError, match="widths"):
-        compose_instruction_tensor(torch.zeros(3, 2, 6), torch.zeros(3, 2, 7))
+def test_to_rgb_converts_mode_and_returns_independent_copy() -> None:
+    source = Image.new("RGBA", (3, 2), (10, 20, 30, 40))
+
+    result = to_rgb(source)
+
+    assert result.mode == "RGB"
+    assert result.size == source.size
+    assert result.getpixel((0, 0)) == (10, 20, 30)
+    result.putpixel((0, 0), (255, 0, 0))
+    assert source.getpixel((0, 0)) == (10, 20, 30, 40)
+
+
+def test_to_rgb_copies_existing_rgb_image() -> None:
+    source = Image.new("RGB", (2, 2), (1, 2, 3))
+
+    result = to_rgb(source)
+    result.putpixel((0, 0), (9, 9, 9))
+
+    assert result is not source
+    assert source.getpixel((0, 0)) == (1, 2, 3)
+
+
+def test_to_rgb_rejects_non_pillow_input() -> None:
+    with pytest.raises(TypeError, match="PIL.Image"):
+        to_rgb("image.png")  # type: ignore[arg-type]
