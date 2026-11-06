@@ -52,10 +52,10 @@ Use `Image.open("image.jpg").convert("RGB")` for your own image. Set `local_file
 
 ## Usage and reference
 
-- [Usage](docs/usage.md): batching, activations, traces, rendering, loss functions, training, and runnable experiments.
-- [API](docs/api.md): imports, signatures, and behavior contracts.
-- [Architecture](docs/architecture.md): the three core objects and package boundaries.
-- [Rendering protocol](docs/protocols/visual-input-rendering.md) and [YAML configuration](examples/image_render.yaml).
+- [Usage](https://github.com/czxvan/VLMBox/blob/main/docs/usage.md): batching, activations, traces, rendering, loss functions, training, and runnable experiments.
+- [API](https://github.com/czxvan/VLMBox/blob/main/docs/api.md): imports, signatures, and behavior contracts.
+- [Architecture](https://github.com/czxvan/VLMBox/blob/main/docs/architecture.md): the three core objects and package boundaries.
+- [Rendering protocol](https://github.com/czxvan/VLMBox/blob/main/docs/protocols/visual-input-rendering.md) and [YAML configuration](https://github.com/czxvan/VLMBox/blob/main/examples/image_render.yaml).
 
 Layer indices are **zero-based decoder blocks**. Captures and traces return direct block outputs before final model normalization.
 
@@ -74,4 +74,4 @@ CUDA integration tests require locally cached Qwen2.5-VL, InternVL, and SmolVLM 
 VLMBOX_RUN_GPU_INTEGRATION=1 uv run pytest tests/integration
 ```
 
-[Release procedure](RELEASING.md) · [MIT license](LICENSE)
+[Release procedure](https://github.com/czxvan/VLMBox/blob/main/RELEASING.md) · [MIT license](https://github.com/czxvan/VLMBox/blob/main/LICENSE)
