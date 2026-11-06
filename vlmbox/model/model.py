@@ -10,7 +10,7 @@ from typing import Any
 import torch
 from torch import Tensor
 
-from vlmbox.activation import (
+from .activation import (
     ActivationCapture,
     ActivationIntervention,
     Component,
@@ -18,8 +18,8 @@ from vlmbox.activation import (
     InterventionScope,
     PositionSelector,
 )
-from vlmbox.adapter import ModelAdapter, TransformersAdapter
-from vlmbox.generation import GenerationTrace, generate_trace
+from .adapter import ModelAdapter, TransformersAdapter
+from .generation import GenerationTrace, generate_trace
 
 
 def move_inputs(inputs: Mapping[str, Any], device: torch.device) -> Any:

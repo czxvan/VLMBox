@@ -8,8 +8,8 @@ import pytest
 import torch
 from torch import nn
 
-from vlmbox.adapter import TransformersAdapter
 from vlmbox.model import VLM
+from vlmbox.model.adapter import TransformersAdapter
 
 
 class FakeLayer(nn.Module):

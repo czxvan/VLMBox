@@ -79,7 +79,8 @@ VLMBox owns layer numbering. During migration, convert one-based stored block nu
 | Previous interface | Current location or replacement |
 |---|---|
 | Top-level training types or `vlmbox.training` | `vlmbox.trainer`: `Trainer`, `Sample`, `TrainStep`, `LossFunction` |
-| Top-level generation result/error types | `vlmbox.generation` |
+| Top-level generation result/error types or `vlmbox.generation` | `vlmbox.model.generation` |
+| `vlmbox.adapter` and `vlmbox.activation` | `vlmbox.model.adapter` and `vlmbox.model.activation` |
 | `vlmbox.representation` helpers | `vlmbox.utils`: `mean_difference`, `normalize_direction`, `project`, `projection_length`, `cosine_similarity` |
 | `vlmbox.repro.set_seed` | `vlmbox.utils.set_seed`, also available at the package root |
 | `projection_coefficient` | Computed inside `project`; explicit scalar formulas belong in experiment code when needed |
@@ -89,6 +90,6 @@ VLMBox owns layer numbering. During migration, convert one-based stored block nu
 | `adapter.final_norm`, `adapter.lm_head` | Access the native model explicitly for research that requires these components |
 | Required metadata/adapter arguments to `VLM(...)` | `VLM(model, processor)`; optional keyword metadata and custom adapter |
 
-Removed modules and top-level aliases have no compatibility shims. The optimizer component now lives in `vlmbox.trainer`; update previous `from vlmbox.training import ...` imports to `from vlmbox.trainer import ...`. Rendering implementation modules are not extension contracts. The root package contains no private helper modules.
+`VLM` remains importable from `vlmbox` and `vlmbox.model`. Model-specific modules now live together under `vlmbox.model`; update explicit adapter, activation, and generation imports to their nested paths. Removed modules and top-level aliases have no compatibility shims. The optimizer component now lives in `vlmbox.trainer`; update previous `from vlmbox.training import ...` imports to `from vlmbox.trainer import ...`. Rendering implementation modules are not extension contracts. The root package contains no private helper modules.
 
 The trainer's callable parameter is `loss_function`, typed by the structural `LossFunction` protocol. It receives `(outputs, inputs, samples)` from one forward and returns a scalar minimization loss. The name `loss` is reserved for scalar records such as `TrainStep.loss`.

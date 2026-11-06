@@ -11,8 +11,9 @@ from typing import Literal
 import torch
 from torch import Tensor, nn
 
-from vlmbox.adapter import ModelAdapter
 from vlmbox.utils import project
+
+from .adapter import ModelAdapter
 
 Component = Literal["block", "attention", "mlp"]
 PositionSelector = Literal["all", "last"] | int | Sequence[int]

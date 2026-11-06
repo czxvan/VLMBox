@@ -12,10 +12,10 @@ from typing import TYPE_CHECKING, Any, Literal
 import torch
 from torch import Tensor
 
-from vlmbox.activation import activation_tensor, layer_indices
+from .activation import activation_tensor, layer_indices
 
 if TYPE_CHECKING:
-    from vlmbox.model import VLM
+    from .model import VLM
 
 GenerationPhase = Literal["prefill", "decode"]
 FinishReason = Literal["eos", "length", "unknown"]

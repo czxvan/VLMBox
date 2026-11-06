@@ -4,9 +4,9 @@ import pytest
 import torch
 from torch import nn
 
-from vlmbox.activation import ActivationError
-from vlmbox.adapter import TransformersAdapter
 from vlmbox.model import VLM
+from vlmbox.model.activation import ActivationError
+from vlmbox.model.adapter import TransformersAdapter
 
 
 class FakeBlock(nn.Module):

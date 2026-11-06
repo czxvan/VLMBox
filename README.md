@@ -4,6 +4,8 @@ A lightweight library for controlled experiments on vision-language models (VLMs
 
 VLMBox provides `VLM` for unified model operations and `Renderer` for reproducible visual inputs. Optional image optimization lives in `vlmbox.trainer`; numerical helpers live in `vlmbox.utils`. PyTorch and Transformers own execution, preprocessing, and generation. Experiment code owns datasets, losses, evaluation, and reporting.
 
+The core components are `VLM` (`model/`), `Renderer` (`renderer/`), and `Trainer` (`trainer.py`). Model loading, layout adaptation, activation operations, and generation traces live together in `model/`. See the [architecture](docs/architecture.md) for package boundaries.
+
 `Renderer` is a PyTorch module: `renderer(host, instruction)` returns a differentiable Tensor, while `renderer.render(host, instruction)` returns a PIL image. Training uses standard `.parameters()`, `.to()`, and a bounded `.project_()` update.
 
 ## Features

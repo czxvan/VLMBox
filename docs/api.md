@@ -6,8 +6,8 @@ The top-level API exports `VLM`, `Renderer`, and `set_seed`. Training, numerical
 from vlmbox import VLM, Renderer, set_seed
 from vlmbox.trainer import LossFunction, Sample, Trainer, TrainStep
 from vlmbox.utils import mean_difference, normalize_direction, project
-from vlmbox.generation import GenerationTrace, GenerationStep, GenerationTraceError
-from vlmbox.adapter import ModelAdapter, TransformersAdapter
+from vlmbox.model.generation import GenerationTrace, GenerationStep, GenerationTraceError
+from vlmbox.model.adapter import ModelAdapter, TransformersAdapter
 ```
 
 The public rendering interface is `Renderer`; `renderer.layout` and `renderer.intervention` are implementation details. See [research adapters and migration](research-adapters.md) for the boundary between VLMBox and project code.

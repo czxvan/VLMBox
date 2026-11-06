@@ -6,13 +6,13 @@ import pytest
 import torch
 from torch import nn
 
-from vlmbox.adapter import TransformersAdapter
-from vlmbox.generation import (
+from vlmbox.model import VLM
+from vlmbox.model.adapter import TransformersAdapter
+from vlmbox.model.generation import (
     GenerationStep,
     GenerationTrace,
     GenerationTraceError,
 )
-from vlmbox.model import VLM
 
 
 class FakeModel(nn.Module):

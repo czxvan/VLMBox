@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from torch import nn
 
-from vlmbox.adapter import AdapterError, TransformersAdapter
+from vlmbox.model.adapter import AdapterError, TransformersAdapter
 
 
 class FakeLayer(nn.Module):

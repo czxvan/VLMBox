@@ -2,32 +2,46 @@
 
 VLMBox supplies shared model operations for controlled VLM experiments: prepare inputs, inspect decoder states, intervene on activations, trace generation, and optimize visual interventions. VLMBox owns model-layout adaptation and decoder-layer semantics. Experiment code owns datasets, messages, losses, token masks, metrics, and reporting.
 
-The public package root exports `VLM`, `Renderer`, and `set_seed`. Optional training lives in `vlmbox.trainer`, numerical helpers in `vlmbox.utils`, and trace result types in `vlmbox.generation`. Native model/processor access is an advanced escape hatch. Daily research adapters should use the shared operations; recurring native workarounds indicate a missing shared operation.
+The public package root exports `VLM`, `Renderer`, and `set_seed`. Optional training lives in `vlmbox.trainer`, numerical helpers in `vlmbox.utils`, and trace result types in `vlmbox.model.generation`. Native model/processor access is an advanced escape hatch. Daily research adapters should use the shared operations; recurring native workarounds indicate a missing shared operation.
+
+## Core objects and package boundaries
+
+| Object | Responsibility | Public import |
+|---|---|---|
+| `VLM` | Load/wrap the native model and processor; prepare inputs, execute, inspect activations, and trace generation | `from vlmbox import VLM` |
+| `Renderer` | Compose visual inputs and own trainable visual intervention parameters using standard PyTorch module operations | `from vlmbox import Renderer` |
+| `Trainer` | Coordinate frozen-model optimization of a renderer using the caller's loss function | `from vlmbox.trainer import Trainer` |
+
+`Sample`, `TrainStep`, and `LossFunction` describe the trainer's inputs, results, and loss contract. `ModelAdapter` is the model-layout extension contract. Activation contexts and generation traces support the `VLM` interface; they do not require separate top-level subsystems. `set_seed` and numerical operations are utility functions.
+
+Packages group several related implementations, rather than requiring a directory for every class. `model/` groups the model entry point, native layout adapter, activation operations, and generation traces. `renderer/` groups rendering, typography, and visual parameters. These packages have independent responsibilities and share no model-specific rendering logic. `trainer.py` remains one file because its records, loss contract, and optimization loop form one small component; `utils.py` remains shared utilities. Package `__init__.py` files expose entry points without implementing them.
 
 ## Files and their responsibilities
 
 ```text
 vlmbox/
 ├── __init__.py
-├── model.py
-├── adapter.py
-├── activation.py
-├── generation.py
+├── model/
+│   ├── __init__.py
+│   ├── model.py
+│   ├── adapter.py
+│   ├── activation.py
+│   └── generation.py
+├── renderer/
+│   ├── __init__.py
+│   ├── renderer.py
+│   ├── layout.py
+│   └── intervention.py
 ├── trainer.py
-├── utils.py
-└── renderer/
-    ├── __init__.py
-    ├── renderer.py
-    ├── layout.py
-    └── intervention.py
+└── utils.py
 ```
 
 | File | Responsibility and reason to exist separately |
 |---|---|
-| `model.py` | The `VLM` entry point: checkpoint loading, native input preparation, device transfer, and delegation to research operations |
-| `adapter.py` | Maps supported native model layouts to zero-based decoder blocks, attention, and MLP; isolates architecture-specific paths |
-| `activation.py` | Owns hook installation/removal, token selection, capture, and intervention; shared by single-forward capture and generation traces |
-| `generation.py` | Owns trace data, per-forward alignment, logits, decoding, and finish-reason inference; avoids mixing generation-result adaptation into model loading |
+| `model/model.py` | The `VLM` entry point: checkpoint loading, native input preparation, device transfer, and delegation to research operations |
+| `model/adapter.py` | Maps supported native model layouts to zero-based decoder blocks, attention, and MLP; isolates architecture-specific paths |
+| `model/activation.py` | Owns hook installation/removal, token selection, capture, and intervention; shared by single-forward capture and generation traces |
+| `model/generation.py` | Owns trace data, per-forward alignment, logits, decoding, and finish-reason inference; avoids mixing generation-result adaptation into model loading |
 | `trainer.py` | Coordinates frozen-model image optimization and state restoration; rendering remains usable independently |
 | `utils.py` | Small shared numerical and reproducibility operations with explicit precision and gradient behavior |
 | `renderer/renderer.py` | Public `Renderer`: YAML loading, rendering orchestration, bounded caching, metadata, and intervention weight persistence |
@@ -35,7 +49,7 @@ vlmbox/
 | `renderer/intervention.py` | One `Intervention` module for patch/delta parameters, projection bounds, and host-relative geometry; has no typography or model dependency |
 | `__init__.py` files | Define the small public import surfaces; contain no implementation logic |
 
-Each implementation file isolates an operation with its own invariants and validation. The root contains no private helper modules. Rendering implementation details are grouped by responsibility in the rendering package; only `Renderer` is its supported public interface.
+Each implementation file isolates an operation with its own invariants and validation. The root contains the two domain packages, the trainer, shared utilities, and their exports. Rendering implementation details are grouped by responsibility in the rendering package; only `Renderer` is its supported public interface.
 
 Module names use nouns for components (`model`, `adapter`, `renderer`, `trainer`), domain data/operations (`activation`, `generation`, `layout`, `intervention`), or shared utilities (`utils`). `trainer.py` names the concrete optimizer component; `Trainer` optimizes rendered intervention parameters against a frozen VLM; `Sample` is its input record and `TrainStep` its scalar output record. The callable `LossFunction` protocol defines a single-forward loss contract; `Trainer` accepts it as `loss_function`, while `TrainStep.loss` records the scalar value.
 
@@ -89,4 +103,4 @@ The remaining numerical helpers are used by activation projection or the paired-
 2. **Reduce configuration choices.** A future schema can remove fixed `host.preserve_original_size` and `host.color_space` switches because native size and RGB are protocol invariants. Keep the present schema readable until a deliberate migration; avoid aliases and a general configuration framework. Clarify whether `Sample.image_instruction` should be required at construction since the current trainer always requires it.
 3. **Profile the preparation boundary.** Measure CPU image conversion, native processor work, host-to-device transfers, and model forward separately on representative research batches. Optimize demonstrated costs while preserving native pixel outputs and gradients. Cache reusable typography, never tensors retaining a previous step's autograd graph.
 
-Keep the current directory boundaries. No backend registry, trainer callback framework, or additional facade is justified by the present adapters. The next architectural evidence should come from smaller research adapters and reproducible timing measurements.
+The model and renderer packages express the current domain boundaries. Split the trainer only if it develops independently useful components. No backend registry, trainer callback framework, or additional facade is justified by the present adapters. The next architectural evidence should come from smaller research adapters and reproducible timing measurements.
